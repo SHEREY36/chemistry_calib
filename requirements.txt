@@ -1,0 +1,18 @@
+# Environment: conda env "epitaxy" (Python 3.11.15, miniforge3)
+# activate with: conda activate epitaxy
+numpy==2.4.6
+scipy==1.17.1
+pandas==3.0.3
+scikit-learn==1.9.0
+arviz==0.23.4
+matscipy==1.2.0
+
+# Installed for this project (Phase 0)
+jax==0.10.2
+jaxlib==0.10.2
+numpyro==0.21.0
+equinox==0.13.8
+optax==0.2.8
+polars==1.42.1
+pydantic==2.13.4
+pytest==9.1.1
