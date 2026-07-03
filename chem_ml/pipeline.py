@@ -26,6 +26,12 @@ from chem_ml.calibration import (
 from chem_ml.config import Config
 from chem_ml.features import build_features
 from chem_ml.identifiability import eigenspectrum, fisher_information, parameter_covariance
+from chem_ml.inverse_design import (
+    feature_to_recipe,
+    inverse_design,
+    posterior_predictive_variance,
+    stack_theta_samples,
+)
 from chem_ml.physics_core import b_logmodel, ge_logmodel, gr_logmodel
 from chem_ml.reactor_transfer import reactor_transfer_model_ge_only, reactor_transfer_model_gr_ge
 from chem_ml.registry import SpeciesRegistry
@@ -394,3 +400,82 @@ def run_phase7_cross_reactor(cfg: Config, phase4_result: dict, ds: Dataset | Non
         "diag_ds3": diag_ds3, "diag_ds4": diag_ds4,
         "report": report,
     }
+
+
+def _gr_ge_forward_log(theta: dict, X: jnp.ndarray) -> jnp.ndarray:
+    """Stacked [ln(GR), ln(x/(1-x))] forward map for inverse design. theta
+    is the union of the GR and Ge param dicts -- their key sets don't
+    overlap, and each logmodel structurally only reads its own keys."""
+    return jnp.stack([gr_logmodel(theta, X), ge_logmodel(theta, X)], axis=1)
+
+
+def run_phase8_inverse_design(cfg: Config, phase4_result: dict,
+                              target_gr_nm_min: float, target_ge_frac: float,
+                              n_uq_samples: int = 60, seed: int = 0) -> dict:
+    """Phase 8: given a target (GR, %Ge), find the recipe (T, pHCl/pDCS,
+    pGeH4/pDCS) that achieves it, penalized by posterior-predictive
+    uncertainty. Refuses low-confidence targets rather than silently
+    extrapolating: flags a result if (a) the UQ penalty at the solution is
+    far above what's typical for DS1's own training points, or (b) the
+    optimizer had to push the solution to the edge of DS1's observed
+    feature range to get anywhere close to the target."""
+    fb1 = phase4_result["features_ds1"]
+    invT_scaler = fb1.invT_scaler
+    theta_gr = posterior_mean_params(phase4_result["mcmc_gr"], _GR_PARAM_NAMES)
+    theta_ge = posterior_mean_params(phase4_result["mcmc_ge"], _GE_PARAM_NAMES)
+    theta_bar = {**theta_gr, **theta_ge}
+
+    y_target_log = jnp.array([np.log(target_gr_nm_min), np.log(target_ge_frac / (1 - target_ge_frac))])
+
+    X_np = np.asarray(fb1.X)
+    lo, hi = jnp.asarray(X_np.min(axis=0)), jnp.asarray(X_np.max(axis=0))
+    x0 = jnp.asarray(X_np.mean(axis=0))
+
+    s_gr, s_ge = phase4_result["mcmc_gr"].get_samples(), phase4_result["mcmc_ge"].get_samples()
+    n = len(s_gr["lnK_GR"])
+    idx = np.random.default_rng(seed).choice(n, size=min(n_uq_samples, n), replace=False)
+    theta_samples = [
+        {**{k: float(s_gr[k][i]) for k in _GR_PARAM_NAMES}, **{k: float(s_ge[k][i]) for k in _GE_PARAM_NAMES}}
+        for i in idx
+    ]
+    theta_stacked = stack_theta_samples(theta_samples)
+
+    def uq_fn(x):
+        return posterior_predictive_variance(_gr_ge_forward_log, theta_stacked, x)
+
+    # Baseline: typical UQ penalty at DS1's own (in-distribution) points.
+    baseline_uq = float(np.mean([float(uq_fn(jnp.asarray(row))) for row in X_np[::7]]))
+
+    x_star = inverse_design(_gr_ge_forward_log, theta_bar, y_target_log, x0, (lo, hi),
+                            uq_fn=uq_fn, lam=cfg.inverse_uq_lambda, steps=500, lr=1e-2)
+
+    pred = _gr_ge_forward_log(theta_bar, x_star[None, :])[0]
+    pred_gr = float(jnp.exp(pred[0]))
+    ratio_pred = float(jnp.exp(pred[1]))
+    pred_ge = ratio_pred / (1.0 + ratio_pred)
+    uq_at_solution = float(uq_fn(x_star))
+    # Only check boundary-pinning on non-degenerate columns: DS1 has no
+    # B2H6 (column 3 is constant 0), so lo==hi==0 there and x_star[3] would
+    # trivially "equal the boundary" despite that column being unread by
+    # gr_logmodel/ge_logmodel entirely -- not a real extrapolation signal.
+    lo_np, hi_np, x_star_np = np.asarray(lo), np.asarray(hi), np.asarray(x_star)
+    non_degenerate = (hi_np - lo_np) > 1e-9
+    at_boundary = bool(np.any(np.isclose(x_star_np[non_degenerate], lo_np[non_degenerate], atol=1e-2))
+                       or np.any(np.isclose(x_star_np[non_degenerate], hi_np[non_degenerate], atol=1e-2)))
+
+    recipe = feature_to_recipe(x_star, invT_scaler)
+    low_confidence = (uq_at_solution > 3.0 * baseline_uq) or at_boundary
+
+    result = {
+        "target_gr_nm_min": target_gr_nm_min, "target_ge_frac": target_ge_frac,
+        "recipe": recipe,
+        "achieved_gr_nm_min": pred_gr, "achieved_ge_frac": pred_ge,
+        "gr_rel_error": abs(pred_gr - target_gr_nm_min) / target_gr_nm_min,
+        "ge_abs_error": abs(pred_ge - target_ge_frac),
+        "uq_at_solution": uq_at_solution, "baseline_uq": baseline_uq,
+        "at_feasible_boundary": at_boundary,
+        "low_confidence": low_confidence,
+        "accepted": not low_confidence,
+    }
+    log.info("Phase 8 inverse design: %s", result)
+    return result

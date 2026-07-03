@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chem-ml"
+version = "0.1.0"
+description = "Physics-ML chemistry calibration framework (Tomasini et al. 2010 SiGe VPE reproduction)"
+requires-python = ">=3.11"
+
+[project.scripts]
+chem-ml = "chem_ml.cli:main"
+
+[tool.setuptools]
+packages = ["chem_ml", "chem_ml.cfd"]
