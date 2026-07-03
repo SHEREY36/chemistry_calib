@@ -77,6 +77,22 @@ def posterior_predict(model_fn: Callable, mcmc: MCMC, X: jnp.ndarray, cfg: Confi
     return out[site]
 
 
+def mu_draws(logmodel: Callable, mcmc: MCMC, X: jnp.ndarray, param_names: list[str]) -> jnp.ndarray:
+    """Noiseless fitted-curve draws: logmodel(theta_s, X) for every posterior
+    sample s, WITHOUT the observation-noise term that Predictive/posterior_predict
+    would add. This is what Tomasini's own Table 1/2 R^2 is computed against
+    (the deterministic best-fit curve), not simulated noisy resamples.
+    Returns (num_samples, N) in log space."""
+    s = mcmc.get_samples()
+    n_samples = len(s[param_names[0]])
+
+    def one_draw(i):
+        p = {n: s[n][i] for n in param_names}
+        return logmodel(p, X)
+
+    return jax.vmap(one_draw)(jnp.arange(n_samples))
+
+
 def posterior_mean_params(mcmc: MCMC, names: list[str]) -> dict:
     s = mcmc.get_samples()
     return {n: float(jnp.mean(s[n])) for n in names}
