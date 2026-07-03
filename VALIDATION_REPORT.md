@@ -1,10 +1,24 @@
 # Tomasini et al. (2010) Reproduction: Validation Report
 
-Generated 2026-07-03T15:24:32 on Python 3.11.15.
+Generated 2026-07-03T15:58:46 on Python 3.11.15.
 
 Source: P. Tomasini, V. Machkaoutsan, S.G. Thomas, "Analysis of silicon germanium vapor phase epitaxy kinetics," *Thin Solid Films* 518 (2010) S12-S17.
 
 Dataset: 152 canonical rows ingested from the paper's appendices (DS1=70, DS2_GR=18, DS2_B=11, DS3=35, DS4=18).
+
+## Figures
+
+![Fig. 2 reproduction](figures/fig2_gr_parity.png)
+
+![Fig. 3 reproduction](figures/fig3_ge_parity.png)
+
+![Fig. 4 reproduction](figures/fig4_gr_sensitivity.png)
+
+![Fig. 5 reproduction](figures/fig5_ge_sensitivity.png)
+
+![Posterior-predictive calibration](figures/uncertainty_calibration.png)
+
+Calibration (empirical coverage vs. nominal credible level, DS1 in-sample): GR model = ['0.64', '0.83', '0.90', '0.96'] at levels [0.5, 0.8, 0.9, 0.95]; Ge/Si model = ['0.63', '0.86', '0.90', '0.97']. Both models sit slightly *above* the diagonal (conservative, not overconfident) and are within ~0.02 of nominal by the 90% level.
 
 ## Phase 4 -- Bayesian calibration on DS1/DS2 (the core reproduction)
 

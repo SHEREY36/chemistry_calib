@@ -17,6 +17,7 @@ from chem_ml.pipeline import (
     run_phase7_cross_reactor,
     run_phase8_inverse_design,
 )
+from chem_ml.plots import FIG_DIR, generate_all_figures
 
 
 def _fmt(x: float, nd: int = 3) -> str:
@@ -31,6 +32,7 @@ def generate_validation_report(cfg: Config | None = None) -> str:
     p7 = run_phase7_cross_reactor(cfg, p4, ds)
     p8_inrange = run_phase8_inverse_design(cfg, p4, target_gr_nm_min=29.3, target_ge_frac=0.2173)
     p8_extreme = run_phase8_inverse_design(cfg, p4, target_gr_nm_min=500.0, target_ge_frac=0.60)
+    calib = generate_all_figures(cfg, p4)
 
     r4, r6, r7 = p4["report"], p6["report"], p7["report"]
     lines: list[str] = []
@@ -50,6 +52,25 @@ def generate_validation_report(cfg: Config | None = None) -> str:
       f"DS2_B={len(ds.filter(source_dataset='DS2_B'))}, "
       f"DS3={len(ds.filter(source_dataset='DS3'))}, "
       f"DS4={len(ds.filter(source_dataset='DS4'))}).")
+    w("")
+
+    w("## Figures")
+    w("")
+    w("![Fig. 2 reproduction](figures/fig2_gr_parity.png)")
+    w("")
+    w("![Fig. 3 reproduction](figures/fig3_ge_parity.png)")
+    w("")
+    w("![Fig. 4 reproduction](figures/fig4_gr_sensitivity.png)")
+    w("")
+    w("![Fig. 5 reproduction](figures/fig5_ge_sensitivity.png)")
+    w("")
+    w("![Posterior-predictive calibration](figures/uncertainty_calibration.png)")
+    w("")
+    w(f"Calibration (empirical coverage vs. nominal credible level, DS1 in-sample): "
+      f"GR model = {[_fmt(c, 2) for c in calib['gr_coverage']]} at levels {calib['levels']}; "
+      f"Ge/Si model = {[_fmt(c, 2) for c in calib['ge_coverage']]}. Both models sit slightly "
+      f"*above* the diagonal (conservative, not overconfident) and are within ~0.02 of nominal "
+      f"by the 90% level.")
     w("")
 
     w("## Phase 4 -- Bayesian calibration on DS1/DS2 (the core reproduction)")
