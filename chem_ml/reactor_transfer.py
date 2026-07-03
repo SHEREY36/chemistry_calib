@@ -1,26 +1,68 @@
 """
-Hierarchical reactor-transfer random effect (Layer B, data-only version):
-delta_r = {dT_r, alpha_{i,r}, eta_r}. theta_chem SHARED and frozen from the
-Phase 4 DS1 fit; delta_r per-reactor, partially pooled. Implemented in
-Phase 7 -- see build_steps_and_cfd_integration.md.
+Reactor-transfer random effect (Layer B, data-only version): given theta_chem
+FROZEN at its Phase 4 posterior mean (fit on DS1/ASM_Epsilon only), fit a
+small per-reactor delta_r = {alpha_HCl, alpha_GeH4, eta_GR, eta_Ge} to
+recover DS3 (Hartmann) and DS4 (Tan) using only that low-dimensional offset
+(Phase 7.2 cross-reactor validation).
+
+DESIGN NOTE -- dT_r is dropped, not "hierarchical partial pooling":
+  The doc's generic delta_r is {dT_r, alpha_{i,r}, eta_r}. dT_r is NOT
+  identifiable here:
+    - DS3 is measured at a SINGLE fixed T=750C (35 rows, all same T). Any
+      dT_r shift is then just 1/(T+dT_r) evaluated at one T -- a constant
+      across every row, perfectly collinear with ln(eta_r) in log space.
+      There is no way to separate a temperature offset from a scale factor
+      with single-temperature data.
+    - DS4 has no GR at all (Phase 1 data gap: no growth time in the
+      appendix), so only the Ge/Si channel is available, over a narrow
+      20 C range (740-760 C) -- too weak to pin dT_r independently of
+      eta_Ge.
+  So dT_r is fixed at 0 and eta_r absorbs any true reactor-level T offset.
+  This is a smaller delta_r (3-4 params) than the generic doc description,
+  which is explicitly allowed ("~3-5 delta_r parameters").
+
+Also: DS4 flows trace B2H6, but the frozen Ge/Si theta_chem (ge_logmodel)
+structurally never reads the B2H6 feature column (same anti-contamination
+guarantee as Phase 2) -- consistent with Tomasini's own DS4 B-order on the
+Ge/Si ratio being small (0.007-0.04, Eqs. 18-19).
 """
 from __future__ import annotations
 
-from chem_ml.config import PriorConfig
+import jax.numpy as jnp
+import numpyro
+import numpyro.distributions as dist
+
+from chem_ml.physics_core import ge_logmodel, gr_logmodel
+
+_DELTA_R_PRIOR_SD = 1.0  # weak prior on ln_alpha_i, ln_eta -- data-dominated with 18-35 rows
 
 
-def reactor_transfer_model(X_by_reactor: dict, y_by_reactor: dict, pri: PriorConfig):
-    """
-    Phase 7 TODO:
-      - Global chemistry params theta_chem sampled once (shared) -- or frozen
-        at Phase 4's posterior mean, per the cross-reactor validation design.
-      - Hyperpriors: sigma_dT ~ HalfNormal; sigma_alpha ~ HalfNormal.
-      - For each reactor r: dT_r ~ Normal(0, sigma_dT); ln_alpha_{i,r} ~ Normal(0, sigma_alpha);
-        ln_eta_r ~ Normal(0, s).
-      - Transfer map: invT_eff = 1/(T + dT_r); ln_ratio_eff = ln_ratio + ln_alpha_{i,r};
-        GR_eff = eta_r * GR_chem. Feed EFFECTIVE features into gr_logmodel etc.
-      - Likelihood per reactor's rows.
-    CROSS-REACTOR VALIDATION (Phase 7.2): fit theta_chem on DS1 only; FREEZE it;
-    fit ONLY delta_r for DS3/DS4; check GR/Ge recovered within published R^2 band.
-    """
-    raise NotImplementedError("Phase 7: implement hierarchical reactor transfer model")
+def reactor_transfer_model_gr_ge(X: jnp.ndarray, y_gr_log: jnp.ndarray | None,
+                                 y_ge_log: jnp.ndarray | None, theta_gr: dict, theta_ge: dict):
+    """DS3-shaped reactor: both GR and Ge/Si channels available, sharing the
+    SAME alpha_HCl/alpha_GeH4 (a reactor-level partial-pressure delivery
+    offset is a property of the reactor, not of which observable reads it)."""
+    ln_alpha_HCl = numpyro.sample("ln_alpha_HCl", dist.Normal(0.0, _DELTA_R_PRIOR_SD))
+    ln_alpha_GeH4 = numpyro.sample("ln_alpha_GeH4", dist.Normal(0.0, _DELTA_R_PRIOR_SD))
+    ln_eta_GR = numpyro.sample("ln_eta_GR", dist.Normal(0.0, _DELTA_R_PRIOR_SD))
+    ln_eta_Ge = numpyro.sample("ln_eta_Ge", dist.Normal(0.0, _DELTA_R_PRIOR_SD))
+    sigma_gr = numpyro.sample("sigma_GR_r", dist.HalfNormal(0.5))
+    sigma_ge = numpyro.sample("sigma_Ge_r", dist.HalfNormal(0.5))
+
+    X_eff = X.at[:, 1].add(ln_alpha_HCl).at[:, 2].add(ln_alpha_GeH4)
+    mu_gr = ln_eta_GR + gr_logmodel(theta_gr, X_eff)
+    mu_ge = ln_eta_Ge + ge_logmodel(theta_ge, X_eff)
+    numpyro.sample("obs_GR_r", dist.Normal(mu_gr, sigma_gr), obs=y_gr_log)
+    numpyro.sample("obs_Ge_r", dist.Normal(mu_ge, sigma_ge), obs=y_ge_log)
+
+
+def reactor_transfer_model_ge_only(X: jnp.ndarray, y_ge_log: jnp.ndarray | None, theta_ge: dict):
+    """DS4-shaped reactor: no GR available (Phase 1 data gap), Ge/Si only."""
+    ln_alpha_HCl = numpyro.sample("ln_alpha_HCl", dist.Normal(0.0, _DELTA_R_PRIOR_SD))
+    ln_alpha_GeH4 = numpyro.sample("ln_alpha_GeH4", dist.Normal(0.0, _DELTA_R_PRIOR_SD))
+    ln_eta_Ge = numpyro.sample("ln_eta_Ge", dist.Normal(0.0, _DELTA_R_PRIOR_SD))
+    sigma_ge = numpyro.sample("sigma_Ge_r", dist.HalfNormal(0.5))
+
+    X_eff = X.at[:, 1].add(ln_alpha_HCl).at[:, 2].add(ln_alpha_GeH4)
+    mu_ge = ln_eta_Ge + ge_logmodel(theta_ge, X_eff)
+    numpyro.sample("obs_Ge_r", dist.Normal(mu_ge, sigma_ge), obs=y_ge_log)
