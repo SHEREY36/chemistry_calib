@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 
 import arviz as az
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -23,6 +24,7 @@ from chem_ml.calibration import (
 )
 from chem_ml.config import Config
 from chem_ml.features import build_features
+from chem_ml.identifiability import eigenspectrum, fisher_information, parameter_covariance
 from chem_ml.physics_core import b_logmodel, ge_logmodel, gr_logmodel
 from chem_ml.registry import SpeciesRegistry
 from chem_ml.residual_nn import ResidualNN, build_residual_input
@@ -183,3 +185,100 @@ def run_phase5_residual_hybrid(cfg: Config, phase4_result: dict, ds: Dataset | N
 
     return {"net": net, "residual_targets": residual_targets, "g_pred": g_pred,
             "X_full": X_full, "report": report}
+
+
+_GR_PARAM_NAMES = ["lnK_GR", "kappa_GR", "gamma_HCl", "gamma_GeH4"]
+_GE_PARAM_NAMES = ["lnK_Ge", "kappa_Ge", "dgamma_HCl", "dgamma_GeH4"]
+
+# Tomasini Fig. 4 caption's own worked example: pHCl/pDCS=0.34 held fixed,
+# pGeH4/pDCS adjusted at each T to hit 20% Ge, at these four temperatures.
+_FIG4_T_C = (600.0, 650.0, 700.0, 750.0)
+_FIG4_GR_PAPER = {600.0: 0.37, 650.0: 2.5, 700.0: 15.0, 750.0: 73.0}
+_FIG4_HCL_RATIO = 0.34
+_FIG4_TARGET_GE = 0.20
+
+
+def run_phase6_identifiability(cfg: Config, phase4_result: dict) -> dict:
+    """Phase 6: posterior covariance / Fisher eigenspectrum for the GR
+    model, plus autodiff sensitivity derivatives reproducing Tomasini
+    Fig. 4 (dGR/dT). Also cross-checks the fitted model against the GR
+    values the paper itself quotes for that figure's operating points
+    (600/650/700/750 C, pHCl/pDCS=0.34, pGeH4/pDCS tuned to 20% Ge) -- an
+    independent consistency check since those exact points weren't part of
+    the Phase 4 optimization target.
+
+    NOTE on units: dGR/dT is in real physical units (nm/min per K) since T
+    has no missing conversion factor. dxGe/dpGeH4, by contrast, can only be
+    computed here in per-unit-RATIO terms (pGeH4/pDCS is dimensionless) --
+    Tomasini's Fig. 5 reports it per sccm of a 10%-diluted GeH4 flow, and
+    DS1's appendix gives no sccm<->ratio conversion (same data gap as DS4's
+    missing growth time). Reported as a diagnostic, not gated against the
+    paper's absolute number.
+    """
+    mcmc_gr, mcmc_ge = phase4_result["mcmc_gr"], phase4_result["mcmc_ge"]
+    fb1 = phase4_result["features_ds1"]
+    mu, sd = fb1.invT_scaler
+
+    gr_params = posterior_mean_params(mcmc_gr, _GR_PARAM_NAMES)
+    ge_params = posterior_mean_params(mcmc_ge, _GE_PARAM_NAMES)
+    sigma_gr = float(jnp.mean(mcmc_gr.get_samples()["sigma_GR"]))
+
+    # ---- Phase 6.1: posterior covariance / eigenspectrum -------------------
+    cov = parameter_covariance(mcmc_gr, _GR_PARAM_NAMES)
+    eigvals, eigvecs = eigenspectrum(cov)
+    stiffest_idx, sloppiest_idx = int(np.argmin(eigvals)), int(np.argmax(eigvals))
+
+    # ---- Phase 6.2: Fisher information cross-check --------------------------
+    fisher = fisher_information(gr_logmodel, gr_params, fb1.X, sigma_gr, _GR_PARAM_NAMES)
+
+    # ---- Phase 6.3: sensitivity derivatives, reproduce Fig. 4 --------------
+    def solve_geh4_for_target_ge(T_K: float) -> float:
+        target_ln_ratio = float(np.log(_FIG4_TARGET_GE / (1 - _FIG4_TARGET_GE)))
+        invT_std = (1.0 / T_K - mu) / sd
+        ln_geh4 = (target_ln_ratio - ge_params["lnK_Ge"] - ge_params["kappa_Ge"] * invT_std
+                   - ge_params["dgamma_HCl"] * np.log(_FIG4_HCL_RATIO)) / ge_params["dgamma_GeH4"]
+        return float(np.exp(ln_geh4))
+
+    def gr_of_T(T_K, hcl_ratio, geh4_ratio):
+        invT_std = (1.0 / T_K - mu) / sd
+        X = jnp.array([[invT_std, jnp.log(hcl_ratio), jnp.log(geh4_ratio), 0.0]])
+        return jnp.exp(gr_logmodel(gr_params, X))[0]
+
+    sensitivity_table = []
+    for T_c in _FIG4_T_C:
+        T_K = T_c + 273.15
+        geh4_ratio = solve_geh4_for_target_ge(T_K)
+        gr_model = float(gr_of_T(T_K, _FIG4_HCL_RATIO, geh4_ratio))
+        dgr_dt = float(jax.grad(gr_of_T, argnums=0)(T_K, _FIG4_HCL_RATIO, geh4_ratio))
+        sensitivity_table.append({
+            "T_C": T_c, "GeH4_over_DCS": geh4_ratio,
+            "GR_model_nm_min": gr_model, "GR_paper_nm_min": _FIG4_GR_PAPER[T_c],
+            "dGR_dT_nm_min_per_K": dgr_dt,
+        })
+
+    dgr_dt_750 = sensitivity_table[-1]["dGR_dT_nm_min_per_K"]
+
+    # dxGe/d(pGeH4/pDCS) at 750 C, 20% Ge operating point (ratio-space; see
+    # unit caveat in the docstring).
+    def ge_of_geh4(geh4_ratio, T_K, hcl_ratio):
+        invT_std = (1.0 / T_K - mu) / sd
+        X = jnp.array([[invT_std, jnp.log(hcl_ratio), jnp.log(geh4_ratio), 0.0]])
+        ratio = jnp.exp(ge_logmodel(ge_params, X))[0]
+        return ratio / (1.0 + ratio)  # convert x/(1-x) -> x
+
+    T_750 = 750.0 + 273.15
+    geh4_750 = solve_geh4_for_target_ge(T_750)
+    dxge_dgeh4_ratio = float(jax.grad(ge_of_geh4, argnums=0)(geh4_750, T_750, _FIG4_HCL_RATIO))
+
+    report = {
+        "eigvals_ascending": eigvals.tolist(),
+        "stiffest_param": _GR_PARAM_NAMES[stiffest_idx],
+        "sloppiest_param": _GR_PARAM_NAMES[sloppiest_idx],
+        "sensitivity_table": sensitivity_table,
+        "dGR_dT_at_750C": dgr_dt_750,
+        "dGR_dT_in_paper_1_to_2_range": 0.5 <= dgr_dt_750 <= 4.0,  # generous band, see docstring
+        "dxGe_dGeH4ratio_at_750C": dxge_dgeh4_ratio,
+    }
+    log.info("Phase 6 identifiability/sensitivity report: %s", report)
+
+    return {"eigvals": eigvals, "eigvecs": eigvecs, "fisher": fisher, "report": report}
