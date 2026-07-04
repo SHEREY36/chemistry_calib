@@ -319,6 +319,87 @@ a variable — only $(\ln\alpha_{\mathrm{HCl}}, \ln\alpha_{\mathrm{GeH_4}},
 $(\ln\alpha_{\mathrm{HCl}}, \ln\alpha_{\mathrm{GeH_4}}, \ln\eta_{\mathrm{Ge}})$
 for DS4 (3 params, no GR channel — DS4 has no growth time, §2).
 
+### Why this doesn't beat the paper's own per-reactor $R^2$ — and why it can't, by construction
+
+Look again at how $\alpha_{i,r}$ enters the frozen model:
+
+$$
+\gamma_{\mathrm{HCl}}\big(\ln(\text{ratio}_{\mathrm{HCl}}) + \ln\alpha_{\mathrm{HCl},r}\big) = \gamma_{\mathrm{HCl}}\ln(\text{ratio}_{\mathrm{HCl}}) + \gamma_{\mathrm{HCl}}\ln\alpha_{\mathrm{HCl},r}
+$$
+
+Since $\gamma_{\mathrm{HCl}}$ is frozen, $\alpha_{i,r}$'s entire effect is a
+**constant** added to every row's intercept — it can shift the fitted curve up
+or down, but it structurally **cannot change its slope**. Tomasini's own DS3
+fit (Eq. 11) uses different reaction orders ($\gamma_{\mathrm{HCl}}=-1$,
+$\gamma_{\mathrm{GeH_4}}=1$) than DS1 ($-0.7$, $1.3$) — a real slope
+difference. Our transfer model is a **nested restriction** of "fit a fresh
+power law to DS3 with no constraint from DS1" (which is exactly what the
+paper did): a restricted model's $R^2$ on the same data can never exceed the
+unrestricted one's. The gap (0.839 vs. paper's 0.844 for DS3 GR; 0.960 vs.
+0.994 for DS3 Ge/Si) is the price of testing the falsifiable claim "the
+*same* exponents describe a new reactor" — it is not a fitting failure, and
+chasing a higher number here would mean quietly re-allowing the exponents to
+drift per reactor, which defeats the point of the test.
+
+**The fix, if you want it, is not "tune harder" — it's "decide how much slope
+flexibility the data justifies":**
+- With only 2 reference reactors (current state): keep exponents frozen, as
+  now. There isn't enough cross-reactor data to estimate how much they're
+  allowed to vary without just overfitting reactor #3.
+- With 3+ reactors: a proper hierarchical extension,
+  $\gamma_{i,r} = \gamma_i + \Delta\gamma_{i,r}$, $\Delta\gamma_{i,r}\sim\mathcal N(0,\tau_i^2)$,
+  with $\tau_i$ *itself* estimated from the observed spread across reactors —
+  this was the original build doc's plan (`sigma_alpha` as a learned
+  hyperprior); Phase 7 simplified it away specifically because a spread
+  can't be estimated with confidence from only 2 data points.
+
+### What $\alpha_{i,r}$ actually is, and its limits — for the epitaxy conversation
+
+$\alpha_{i,r}$ is a multiplicative correction to the *delivered* ratio
+$p_i/p_{\mathrm{DCS}}$ at the wafer, relative to what DS1's reactor would
+produce from the same setpoint — a stand-in for gas-phase depletion along the
+flow, injector/showerhead mixing, boundary-layer effects, or MFC calibration
+differences between tools. It is **fit**, not measured or derived.
+
+Refitting DS3 and inspecting the raw posterior directly shows the limit of
+this: with priors $\ln\alpha_{\mathrm{HCl}}, \ln\alpha_{\mathrm{GeH_4}}, \ln\eta_{\mathrm{GR}}, \ln\eta_{\mathrm{Ge}} \sim \mathcal N(0,1)$,
+
+$$
+\mathrm{corr}\big(\ln\alpha_{\mathrm{GeH_4}},\ \ln\eta_{\mathrm{Ge}}\big) = -0.97, \qquad
+\mathrm{corr}\big(\ln\alpha_{\mathrm{GeH_4}},\ \ln\eta_{\mathrm{GR}}\big) = -0.71
+$$
+
+i.e. nearly perfectly degenerate. This is expected, not a bug: each reactor
+supplies exactly **2** pieces of intercept information (one net GR shift, one
+net Ge/Si shift), but there are **4** raw parameters trying to explain them —
+the system is under-determined by 2 degrees of freedom, resolved only by the
+prior, not the data. **Practical consequence: don't read individual
+$\alpha_{i,r}$ values as "your GeH₄ delivery is off by $X\%$"** — that
+specific number is mostly prior, not measurement. What *is* robust is the
+combined statement "the frozen chemistry needs this much overall correction
+to match your reactor."
+
+This is precisely the gap Phase 9 (CFD-ACE+) exists to close: the build doc
+frames CFD as computing $\alpha_{i,r}$ (from species-transport/depletion) and
+$\Delta T_r$ (from the thermal solve) **from geometry**, rather than
+curve-fitting them blindly from wafer outcomes. If that's available, $\alpha_{i,r}$
+stops being an unidentifiable fitted number and becomes an actual physical
+prediction you can hand to the epitaxy team.
+
+### Does a downstream user need to specify the reactor?
+
+$\theta_{\text{chem}}$ never takes reactor identity as an input at all (no
+one-hot/embedding) — it's genuinely reactor-agnostic once frozen. A user
+predicting on the reactor it was fit on needs only $(T, \text{ratios})$.
+
+For a *different* reactor, $\delta_r$ is not inferred zero-shot from "this is
+a new reactor" — it must be **fit once**, from a DS3/DS4-scale calibration
+run (18–35 conditions) on that specific tool, exactly as Phase 7 did. After
+that one-time calibration, a downstream user just calls
+`predict(T, ratios)`; reactor identity becomes a config/lookup choice made
+once at setup (which $\delta_r$ to add), not something the chemistry math
+reasons about per call.
+
 **This is the genuine held-out test in the whole pipeline** — DS3/DS4 rows
 never entered Phase 4's likelihood at all:
 
