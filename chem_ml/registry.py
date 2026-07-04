@@ -1,13 +1,21 @@
 """
 SpeciesRegistry: single source of truth for every precursor/dopant/carrier
-the model can use. Adding a species = adding an entry here (Phase 2.1).
-No code change elsewhere.
+the model can use. Adding a species = adding an entry here (Phase 2.1) OR,
+for species discovered after initial deployment, via `add-species` on the
+CLI, which persists to a small JSON sidecar file (see
+load_custom_species/save_custom_species) rather than editing this source
+file -- either way, adding a species never requires touching
+gr_logmodel/ge_logmodel/b_logmodel: the assembler's hard class gate means a
+new species sits inert until a sub-model is explicitly built to read it
+(see chem_ml/assembler.py Phase 2.3 anti-contamination test).
 """
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger("chem_ml")
@@ -38,13 +46,34 @@ class Species:
     default_prior: Optional[dict] = None  # prior on delivery/decomp params for new species
 
 
+def load_custom_species(path: str | Path) -> list[Species]:
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [Species(**{**d, "role": Role(d["role"])}) for d in json.loads(p.read_text())]
+
+
+def save_custom_species(path: str | Path, species_list: list[Species]) -> None:
+    """Append-and-dedupe by canonical_name into the JSON sidecar at `path`."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    existing = load_custom_species(path)
+    existing_names = {s.canonical_name for s in existing}
+    combined = existing + [s for s in species_list if s.canonical_name not in existing_names]
+    p.write_text(json.dumps([asdict(s) for s in combined], indent=2))
+
+
 class SpeciesRegistry:
     """Single source of truth for every precursor/dopant/carrier the model can use.
-    Adding a species = adding an entry here (Phase 2.1). No code change elsewhere."""
+    Adding a species = adding an entry here (Phase 2.1), or persisting it via
+    `custom_species_path` (see module docstring). No code change elsewhere."""
 
-    def __init__(self) -> None:
+    def __init__(self, custom_species_path: str | Path | None = None) -> None:
         self._db: dict[str, Species] = {}
         self._seed_defaults()
+        for sp in load_custom_species(custom_species_path) if custom_species_path else []:
+            if sp.canonical_name not in self._db:
+                self._db[sp.canonical_name] = sp
 
     def _seed_defaults(self) -> None:
         for sp in [
