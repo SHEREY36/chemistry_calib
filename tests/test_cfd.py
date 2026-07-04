@@ -49,6 +49,14 @@ def test_export_mechanism_silane_is_all_seed(tmp_path):
     assert all(s["status"] == "seed" for s in manifest["steps"])
     assert "UNCALIBRATED" in manifest["calibration_status"]
 
+    # The silane UDF must NOT be the DCS-calibrated function (there's no
+    # calibrated silane power law to transcribe -- writing the DCS one here
+    # would be actively misleading, since it takes p_HCl_over_pDCS/
+    # p_GeH4_over_pDCS args that don't correspond to a silane process).
+    udf_src = open(result["udf_path"]).read()
+    assert "calibrated_GR_nm_min" not in udf_src
+    assert "NO calibrated power-law UDF exists" in udf_src
+
 
 def test_udf_arithmetic_matches_python_physics_core(tmp_path):
     """The generated C source's literal constants must match the Python

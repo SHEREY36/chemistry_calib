@@ -1,0 +1,128 @@
+{
+  "chem_system": "dcs",
+  "calibration_status": "S3 (H2 desorption, rate-limiting) Ea pinned to data; all other steps are literature seeds",
+  "site_conservation_constraint": "theta_free + theta_H + theta_Cl + theta_Si + theta_Ge = 1 (enforce as a hard constraint in the CFD surface-chemistry solve)",
+  "steps": [
+    {
+      "step_id": "G1",
+      "reaction": "SiH2Cl2 <=> SiCl2 + H2",
+      "rate_form": "arrhenius_reversible",
+      "A_per_s": null,
+      "Ea_kcal_mol": 65.0,
+      "Ea_J_per_mol": 271960.0,
+      "gamma_sticking": null,
+      "source_class": "Coltrin/Kee chlorosilane; Ho & Melius",
+      "status": "seed"
+    },
+    {
+      "step_id": "G2",
+      "reaction": "GeH4 <=> GeH2 + H2",
+      "rate_form": "arrhenius_reversible",
+      "A_per_s": null,
+      "Ea_kcal_mol": 47.0,
+      "Ea_J_per_mol": 196648.0,
+      "gamma_sticking": null,
+      "source_class": "germane pyrolysis literature",
+      "status": "seed"
+    },
+    {
+      "step_id": "S1",
+      "reaction": "SiH2Cl2(g) + 2s -> SiCl2(s) + 2H(s)",
+      "rate_form": "sticking",
+      "A_per_s": null,
+      "Ea_kcal_mol": null,
+      "Ea_J_per_mol": null,
+      "gamma_sticking": 0.03,
+      "source_class": "Coltrin/Kee; Kleijn reactor models",
+      "status": "seed"
+    },
+    {
+      "step_id": "S2",
+      "reaction": "SiCl2(s) -> Si(b) + 2Cl(s)",
+      "rate_form": "arrhenius",
+      "A_per_s": 10000000000000.0,
+      "Ea_kcal_mol": 50.0,
+      "Ea_J_per_mol": 209200.0,
+      "gamma_sticking": null,
+      "source_class": "chlorosilane surface kinetics",
+      "status": "seed"
+    },
+    {
+      "step_id": "S3",
+      "reaction": "2H(s) -> H2(g) + 2s",
+      "rate_form": "arrhenius",
+      "A_per_s": 10000000000000.0,
+      "Ea_kcal_mol": 48.65295100691944,
+      "Ea_J_per_mol": 203563.94701295093,
+      "gamma_sticking": null,
+      "source_class": "Si(100) H2 TPD literature",
+      "status": "fit_to_power_law"
+    },
+    {
+      "step_id": "S4",
+      "reaction": "2Cl(s) -> Cl2(g) + 2s",
+      "rate_form": "arrhenius",
+      "A_per_s": 10000000000000.0,
+      "Ea_kcal_mol": 72.0,
+      "Ea_J_per_mol": 301248.0,
+      "gamma_sticking": null,
+      "source_class": "Cl/Si desorption literature",
+      "status": "seed"
+    },
+    {
+      "step_id": "S5",
+      "reaction": "HCl(g) + Si(b) -> SiHCl(s)/SiCl2(g)",
+      "rate_form": "arrhenius",
+      "A_per_s": 1000000000000.0,
+      "Ea_kcal_mol": 30.0,
+      "Ea_J_per_mol": 125520.0,
+      "gamma_sticking": null,
+      "source_class": "SEG selectivity literature",
+      "status": "seed"
+    },
+    {
+      "step_id": "S6",
+      "reaction": "GeH4(g) + 2s -> Ge(s) + 2H(s)",
+      "rate_form": "sticking",
+      "A_per_s": null,
+      "Ea_kcal_mol": null,
+      "Ea_J_per_mol": null,
+      "gamma_sticking": 0.3,
+      "source_class": "Imai 2008; germane surface",
+      "status": "seed"
+    },
+    {
+      "step_id": "S7",
+      "reaction": "Ge(s) -> Ge(b)",
+      "rate_form": "arrhenius",
+      "A_per_s": 1000000000000.0,
+      "Ea_kcal_mol": 15.0,
+      "Ea_J_per_mol": 62760.0,
+      "gamma_sticking": null,
+      "source_class": "Imai 2008; Ge/Si competition",
+      "status": "seed"
+    },
+    {
+      "step_id": "S8",
+      "reaction": "B2H6(g) + 2s -> 2BH3(s) -> 2B(b)",
+      "rate_form": "sticking",
+      "A_per_s": null,
+      "Ea_kcal_mol": null,
+      "Ea_J_per_mol": null,
+      "gamma_sticking": 0.1,
+      "source_class": "Tomasini DS2; B-doping literature",
+      "status": "seed"
+    },
+    {
+      "step_id": "S9",
+      "reaction": "H(s) + Cl(s) -> HCl(g) + 2s",
+      "rate_form": "arrhenius",
+      "A_per_s": 10000000000000.0,
+      "Ea_kcal_mol": 58.0,
+      "Ea_J_per_mol": 242672.0,
+      "gamma_sticking": null,
+      "source_class": "surface HCl formation",
+      "status": "seed"
+    }
+  ]
+}

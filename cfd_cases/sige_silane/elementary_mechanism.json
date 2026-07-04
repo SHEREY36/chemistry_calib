@@ -1,0 +1,73 @@
+{
+  "chem_system": "silane",
+  "calibration_status": "ALL STEPS ARE UNCALIBRATED LITERATURE SEEDS -- no Tomasini data covers silane chemistry",
+  "site_conservation_constraint": "theta_free + theta_H + theta_Cl + theta_Si + theta_Ge = 1 (enforce as a hard constraint in the CFD surface-chemistry solve)",
+  "steps": [
+    {
+      "step_id": "G1s",
+      "reaction": "SiH4 <=> SiH2 + H2",
+      "rate_form": "arrhenius_reversible",
+      "A_per_s": null,
+      "Ea_kcal_mol": 57.0,
+      "Ea_J_per_mol": 238488.0,
+      "gamma_sticking": null,
+      "source_class": "silane pyrolysis literature",
+      "status": "seed"
+    },
+    {
+      "step_id": "S1s",
+      "reaction": "SiH4(g) + 2s -> SiH2(s) + 2H(s)",
+      "rate_form": "sticking",
+      "A_per_s": null,
+      "Ea_kcal_mol": null,
+      "Ea_J_per_mol": null,
+      "gamma_sticking": 0.01,
+      "source_class": "SiH4/Si(100) dissociative chemisorption lit.",
+      "status": "seed"
+    },
+    {
+      "step_id": "S2s",
+      "reaction": "SiH2(s) -> Si(b) + 2H(s)",
+      "rate_form": "arrhenius",
+      "A_per_s": 10000000000000.0,
+      "Ea_kcal_mol": 38.0,
+      "Ea_J_per_mol": 158992.0,
+      "gamma_sticking": null,
+      "source_class": "silane surface decomposition lit.",
+      "status": "seed"
+    },
+    {
+      "step_id": "S3s",
+      "reaction": "2H(s) -> H2(g) + 2s",
+      "rate_form": "arrhenius",
+      "A_per_s": 10000000000000.0,
+      "Ea_kcal_mol": 51.5,
+      "Ea_J_per_mol": 215476.0,
+      "gamma_sticking": null,
+      "source_class": "Si(100) H2 TPD literature (same H-desorption physics as DCS case)",
+      "status": "seed"
+    },
+    {
+      "step_id": "S6",
+      "reaction": "GeH4(g) + 2s -> Ge(s) + 2H(s)",
+      "rate_form": "sticking",
+      "A_per_s": null,
+      "Ea_kcal_mol": null,
+      "Ea_J_per_mol": null,
+      "gamma_sticking": 0.3,
+      "source_class": "Imai 2008; germane surface (reused from DCS mechanism)",
+      "status": "seed"
+    },
+    {
+      "step_id": "S7",
+      "reaction": "Ge(s) -> Ge(b)",
+      "rate_form": "arrhenius",
+      "A_per_s": 1000000000000.0,
+      "Ea_kcal_mol": 15.0,
+      "Ea_J_per_mol": 62760.0,
+      "gamma_sticking": null,
+      "source_class": "Imai 2008; Ge/Si competition (reused)",
+      "status": "seed"
+    }
+  ]
+}
