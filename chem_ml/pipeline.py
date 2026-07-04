@@ -4,6 +4,7 @@ Built incrementally as each phase is implemented and verified.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 import arviz as az
@@ -19,6 +20,7 @@ from chem_ml.calibration import (
     gr_numpyro_model,
     mu_draws,
     posterior_mean_params,
+    posterior_to_normal_prior,
     r2_score,
     check_tomasini_acceptance,
     run_mcmc,
@@ -62,14 +64,29 @@ def build_default_registry_and_assembler():
 
 
 def run_phase4_calibration(cfg: Config, ds: Dataset | None = None) -> dict:
-    """Phase 4: NUTS-calibrate GR and Ge/Si on DS1, and the boron model on
-    DS2's [B] rows. Returns a dict with the fitted MCMC objects, the
-    Phase-4.3 acceptance report, and arviz InferenceData for each model
-    (this posterior becomes the prior for Phases 5-8)."""
+    """Phase 4: NUTS-calibrate GR and Ge/Si on the reference reactor's
+    undoped-SiGe rows, and the boron model on its SiGe:B [B] rows. Returns
+    a dict with the fitted MCMC objects, the Phase-4.3 acceptance report,
+    and arviz InferenceData for each model (this posterior becomes the
+    prior for Phases 5-8).
+
+    FILTERING IS BY (chem_class, reactor_id), NOT a literal "DS1"/"DS2_B"
+    source tag -- this is what makes Phase 9's additive training (see
+    data_store.py) actually pool correctly: new undoped-SiGe data added
+    from the SAME reference reactor (ASM_Epsilon) via `add-data` lands in
+    this exact filter and enriches theta_chem directly, with no code
+    change here. New data from a DIFFERENT reactor does NOT match this
+    filter (by design -- it belongs in Phase 7's transfer route instead,
+    see run_phase7_cross_reactor), and new data of a different chem_class
+    (e.g. SiGe:P) doesn't match either filter at all. On pure Tomasini
+    data this is exactly equivalent to source_dataset=="DS1"/"DS2_B" (DS1
+    IS {chem_class=SIGE, reactor_id=ASM_Epsilon}; DS2's [B] rows ARE
+    {chem_class=SIGE_B, reactor_id=ASM_Epsilon, B_conc is not None}) --
+    verified by test_phase4_filter_equivalent_to_literal_ds_tags."""
     if ds is None:
         ds = load_all_datasets(cfg)
 
-    ds1 = ds.filter(source_dataset="DS1")
+    ds1 = ds.filter(chem_class=ChemClass.SIGE, reactor_id="ASM_Epsilon")
     fb1 = build_features(ds1)
     y_gr = np.array([r.GR_nm_min for r in ds1.rows])
     y_ge = np.array([r.Ge_at_frac for r in ds1.rows])
@@ -93,8 +110,9 @@ def run_phase4_calibration(cfg: Config, ds: Dataset | None = None) -> dict:
         mcmc_gr, mcmc_ge, y_gr, y_ge, gr_mu_draws, ge_mu_draws, fb1.invT_scaler, cfg,
     )
 
-    # ---- boron model on DS2's dedicated [B] rows ---------------------------
-    ds2b = ds.filter(source_dataset="DS2_B")
+    # ---- boron model on the reference reactor's dedicated [B] rows ---------
+    ds2b = ds.filter_where(lambda r: r.chem_class == ChemClass.SIGE_B
+                           and r.reactor_id == "ASM_Epsilon" and r.B_conc is not None)
     fb2b = build_features(ds2b)
     b_over_si = np.array([r.B_conc / DS2_SI_ATOMS_CM3 for r in ds2b.rows])
     y_b_log = jnp.asarray(np.log(b_over_si))
@@ -123,6 +141,87 @@ def run_phase4_calibration(cfg: Config, ds: Dataset | None = None) -> dict:
         "idata_ge": az.from_numpyro(mcmc_ge),
         "idata_b": az.from_numpyro(mcmc_b),
     }
+
+
+_B_PARAM_NAMES = ["lnK_B", "beta_HCl", "beta_GeH4", "beta_B2H6"]
+
+
+def run_phase4_warm_start(cfg: Config, previous_result: dict, new_ds: Dataset,
+                          widen_factor: float = 2.0) -> dict:
+    """Additive/incremental calibration (Phase 9+): fit ONLY `new_ds`'s
+    matching rows, using `previous_result`'s posterior (widened by
+    `widen_factor`, see calibration.posterior_to_normal_prior) as the new
+    prior, instead of Phase 4's original literature priors. This is the
+    fast path for "the epitaxy team ran 6 more wafers, fold them in" --
+    NUTS only re-samples against the new rows, not the whole accumulated
+    history.
+
+    `new_ds` is filtered by the SAME (chem_class, reactor_id) rule as
+    run_phase4_calibration, so data from a different reactor or chemistry
+    class is silently excluded here too (not silently POOLED WRONG -- if
+    len(new_sige)==0 because everything in new_ds is e.g. a different
+    reactor, this function just returns previous_result's GR/Ge models
+    unchanged and says so in the returned dict).
+
+    APPROXIMATION, NOT A SUBSTITUTE FOR PERIODIC FULL REFITS: because
+    every observable here is linear-Gaussian in log-space, treating the
+    posterior as a new prior is close to the mathematically exact
+    sequential-Bayesian-update answer (Normal-Inverse-Gamma conjugacy) --
+    but "close to exact in principle" still accumulates two real
+    approximation sources over many warm-start calls: (1) NUTS's finite
+    posterior sample is not the exact continuous distribution, and (2) the
+    invT standardization (mu, sd) is reused from the ORIGINAL fit's
+    temperature range, which can become a poor scaling choice if new data
+    extends well outside it. Re-run run_phase4_calibration on
+    data_store.load_accumulated_dataset(cfg) periodically (e.g. after
+    every 3-5 warm starts, or before any decision that matters) as the
+    ground-truth resync -- this function is for fast iteration between
+    those, not a replacement for them."""
+    new_sige = new_ds.filter(chem_class=ChemClass.SIGE, reactor_id="ASM_Epsilon")
+    new_sigeb = new_ds.filter_where(lambda r: r.chem_class == ChemClass.SIGE_B
+                                    and r.reactor_id == "ASM_Epsilon" and r.B_conc is not None)
+
+    updated = dict(previous_result)
+    updated["warm_start_widen_factor"] = widen_factor
+    updated["n_new_sige_rows"] = len(new_sige)
+    updated["n_new_sigeb_rows"] = len(new_sigeb)
+
+    if len(new_sige) > 0:
+        fb_new = build_features(new_sige, invT_scaler=previous_result["features_ds1"].invT_scaler)
+        y_gr_new = np.array([r.GR_nm_min for r in new_sige.rows])
+        y_ge_new = np.array([r.Ge_at_frac for r in new_sige.rows])
+
+        gr_prior_updates = posterior_to_normal_prior(previous_result["mcmc_gr"], _GR_PARAM_NAMES, widen_factor)
+        ge_prior_updates = posterior_to_normal_prior(previous_result["mcmc_ge"], _GE_PARAM_NAMES, widen_factor)
+        cfg_gr = dataclasses.replace(cfg, priors=dataclasses.replace(cfg.priors, **gr_prior_updates))
+        cfg_ge = dataclasses.replace(cfg, priors=dataclasses.replace(cfg.priors, **ge_prior_updates))
+
+        log.info("Warm-start: refitting GR/Ge on %d NEW row(s) only (widened posterior as prior)", len(new_sige))
+        updated["mcmc_gr"] = run_mcmc(gr_numpyro_model, fb_new.X, jnp.log(jnp.asarray(y_gr_new)), cfg_gr)
+        updated["mcmc_ge"] = run_mcmc(ge_numpyro_model, fb_new.X,
+                                      jnp.log(jnp.asarray(y_ge_new / (1.0 - y_ge_new))), cfg_ge)
+        updated["diag_gr"] = diagnostics(updated["mcmc_gr"])
+        updated["diag_ge"] = diagnostics(updated["mcmc_ge"])
+    else:
+        log.info("Warm-start: no new rows matched (chem_class=SIGE, reactor_id=ASM_Epsilon); "
+                 "GR/Ge models unchanged.")
+
+    if len(new_sigeb) > 0:
+        fb_new_b = build_features(new_sigeb, invT_scaler=previous_result["features_ds2b"].invT_scaler)
+        b_over_si_new = np.array([r.B_conc / DS2_SI_ATOMS_CM3 for r in new_sigeb.rows])
+        b_prior_updates = posterior_to_normal_prior(previous_result["mcmc_b"], _B_PARAM_NAMES, widen_factor)
+        cfg_b = dataclasses.replace(cfg, priors=dataclasses.replace(cfg.priors, **b_prior_updates))
+
+        log.info("Warm-start: refitting B/Si on %d NEW row(s) only (widened posterior as prior)", len(new_sigeb))
+        updated["mcmc_b"] = run_mcmc(b_numpyro_model, fb_new_b.X, jnp.log(jnp.asarray(b_over_si_new)), cfg_b)
+        updated["diag_b"] = diagnostics(updated["mcmc_b"])
+    else:
+        log.info("Warm-start: no new [B] rows matched; B/Si model unchanged.")
+
+    log.warning("Warm-start applied (widen_factor=%.1f). Recommend a full pooled refit via "
+               "run_phase4_calibration(cfg, ds=data_store.load_accumulated_dataset(cfg)) "
+               "periodically -- see this function's docstring.", widen_factor)
+    return updated
 
 
 def run_phase5_residual_hybrid(cfg: Config, phase4_result: dict, ds: Dataset | None = None) -> dict:

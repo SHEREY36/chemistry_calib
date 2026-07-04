@@ -80,6 +80,14 @@ class Dataset:
             return all(getattr(r, k) == v for k, v in kw.items())
         return Dataset([r for r in self.rows if ok(r)])
 
+    def filter_where(self, predicate) -> "Dataset":
+        """Like `filter`, but for conditions equality kwargs can't express
+        (e.g. `lambda r: r.B_conc is not None`)."""
+        return Dataset([r for r in self.rows if predicate(r)])
+
+    def __add__(self, other: "Dataset") -> "Dataset":
+        return Dataset(self.rows + other.rows)
+
     def __len__(self) -> int:
         return len(self.rows)
 
@@ -164,6 +172,48 @@ def ingest_tomasini(data_raw: str | Path) -> Dataset:
             source_dataset="DS4",
         ))
 
+    ds = Dataset(rows)
+    ds.validate()
+    return ds
+
+
+# ---------------------------------------------------------------------------
+# STANDARD INTAKE FORMAT for any data added AFTER the initial Tomasini
+# reproduction (Phase 9+ "additive training": new epitaxy-team experiments,
+# not a from-scratch retrain). Unlike ingest_tomasini (which has to match
+# each appendix's own quirky column names), this defines ONE stable schema
+# for all future data, Tomasini-shaped or not:
+#
+#   T_C, HCl_over_DCS, GeH4_over_DCS, B2H6_over_DCS (optional, default 0),
+#   GR_nm_min (optional), Ge_at_pct (optional), B_conc_at_cm3 (optional)
+#
+# growth_time_s is NOT required in this format because GR_nm_min is
+# expected pre-computed -- but see the README's data-collection checklist:
+# record raw growth time anyway, since Tomasini's own DS4 (no growth time
+# in the appendix) is the one hard data gap this whole reproduction hit.
+# ---------------------------------------------------------------------------
+def ingest_standard_csv(path: str | Path, reactor_id: str, chem_class: ChemClass,
+                        mode: Mode = Mode.BLANKET, source_tag: str = "") -> Dataset:
+    """Ingest one CSV in the standard intake format above into canonical
+    rows tagged with the GIVEN reactor_id/chem_class/source_tag (never
+    inferred from the data -- the caller must state which reactor and
+    chemistry class this data belongs to; see data_store.py for why that
+    explicit tagging is exactly what keeps additive training from
+    contaminating across reactors/classes)."""
+    df = pd.read_csv(path)
+    rows: list[CanonicalRow] = []
+    for r in df.itertuples():
+        rows.append(CanonicalRow(
+            reactor_id=reactor_id, chem_class=chem_class, mode=mode,
+            T_K=_c_to_k(r.T_C), p_DCS=1.0, p_GeH4=r.GeH4_over_DCS,
+            p_HCl=r.HCl_over_DCS,
+            p_B2H6=getattr(r, "B2H6_over_DCS", 0.0) or 0.0,
+            GR_nm_min=getattr(r, "GR_nm_min", None),
+            Ge_at_frac=(getattr(r, "Ge_at_pct", None) / 100.0
+                       if getattr(r, "Ge_at_pct", None) is not None else None),
+            B_conc=getattr(r, "B_conc_at_cm3", None),
+            source_dataset=source_tag or f"additional:{Path(path).stem}",
+        ))
     ds = Dataset(rows)
     ds.validate()
     return ds

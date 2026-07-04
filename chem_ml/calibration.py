@@ -98,6 +98,29 @@ def posterior_mean_params(mcmc: MCMC, names: list[str]) -> dict:
     return {n: float(jnp.mean(s[n])) for n in names}
 
 
+def posterior_to_normal_prior(mcmc: MCMC, names: list[str], widen_factor: float = 2.0) -> dict[str, tuple]:
+    """Turn a fitted posterior into a NEW Normal prior (mean, std) per
+    parameter -- "yesterday's posterior is tomorrow's prior" (Phase 4.4),
+    used by pipeline.run_phase4_warm_start for additive/incremental
+    calibration on new data only.
+
+    WHY widen_factor (default 2x) instead of using the raw posterior std:
+    the GR/Ge/B models are linear-Gaussian in log-space (Normal likelihood,
+    Normal prior, log-linear mean function), so *exact* sequential Bayesian
+    updating (treating today's posterior as tomorrow's prior) is close to
+    correct here -- this is the Normal-Inverse-Gamma conjugate family, not
+    an ad hoc approximation, UNLIKE the residual NN (point-estimate,
+    non-Bayesian) or a genuinely nonlinear model, where this trick would
+    be far shakier. The widening is a separate, deliberate safety margin
+    for what NUTS's finite posterior SAMPLE doesn't capture exactly (a
+    thousand posterior draws approximate a continuous distribution, they
+    don't equal it) and for the fact that this is only ever used between
+    periodic full pooled refits (see run_phase4_warm_start), not as a
+    permanent substitute for one."""
+    s = mcmc.get_samples()
+    return {n: (float(jnp.mean(s[n])), float(jnp.std(s[n])) * widen_factor) for n in names}
+
+
 # ---- convergence diagnostics (Phase 4.2) -----------------------------------
 def diagnostics(mcmc: MCMC) -> dict:
     """R-hat / ESS / divergence summary. Gate: max R-hat < 1.01, min ESS
