@@ -31,11 +31,11 @@ transfers to a reactor it never saw data from.
 
 ---
 
-## 2. What came from Tomasini — and what that means for the AMAT ask
+## 2. What came from Tomasini — and what that means for the XYZ ask
 
 Tomasini's paper supplied four datasets, each playing a **different structural
 role**. This mapping matters because it tells you exactly what shape of data to
-request from the AMAT epitaxy team.
+request from the XYZ epitaxy team.
 
 | Dataset | Reactor | N | T range | Pressure | Precursors | Measured | Role in this pipeline |
 |---|---|---|---|---|---|---|---|
@@ -53,7 +53,7 @@ the first place (Phase 7 shows exactly why: with T fixed, a temperature-offset
 parameter becomes mathematically indistinguishable from a scale factor — see
 §8).
 
-### What to request from AMAT, in this language
+### What to request from XYZ, in this language
 
 1. **One "DS1-equivalent" sweep on a single, well-characterized reactor**: at
    least 6–9 distinct temperatures spanning your real operating window, crossed
@@ -64,7 +64,7 @@ parameter becomes mathematically indistinguishable from a scale factor — see
    absence of this is the one hard blocker in the whole reproduction — it
    demoted an entire dataset from "fits GR" to "Ge% only." This is the single
    cheapest thing to fix in a new data request.
-3. **A smaller confirmatory set on the actual target (AMAT) reactor** — DS3/DS4
+3. **A smaller confirmatory set on the actual target (XYZ) reactor** — DS3/DS4
    scale (20–35 runs, a couple of ratio levels, doesn't need to span T as
    widely) is enough to fit the reactor-offset $\delta_r$ in §8, *provided*
    (1) already exists from a reference reactor.
@@ -242,7 +242,7 @@ isn't identifiable — it's simply omitted, not fit-and-ignored).
 **Data**: **11 rows** — the same NUTS/MCMC machinery as §4–5, but this is the
 thinnest dataset in the whole pipeline (4 free parameters $+ \sigma$ fit to 11
 points). The posterior is wide; treat $\beta_{\mathrm{B_2H_6}}$ as indicative,
-not tightly pinned. If boron control matters to the AMAT program, this is the
+not tightly pinned. If boron control matters to the XYZ program, this is the
 first sub-model worth re-fitting on more data (§2, point 4).
 
 ---
@@ -534,8 +534,8 @@ Being precise about this, since it's the crux of your question:
 - **Ad hoc, not systematic**: §10 (inverse design) — 2 examples, not a test
   suite over a grid of targets.
 
-If the AMAT data (§2) arrives, the single highest-leverage thing to redo with
+If the XYZ data (§2) arrives, the single highest-leverage thing to redo with
 it is **§8's exact procedure**: freeze $\theta_{\text{chem}}$ from a DS1-scale
-sweep, fit only $\delta_r$ on a DS3/DS4-scale AMAT sample, and see if the same
+sweep, fit only $\delta_r$ on a DS3/DS4-scale XYZ sample, and see if the same
 $R^2$ band holds. That is the direct, falsifiable test of "does Tomasini's
 chemistry actually describe this precursor system," independent of reactor.

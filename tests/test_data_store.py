@@ -76,15 +76,15 @@ def test_warm_start_ignores_different_chem_class(tmp_path, phase4):
 
 
 def test_warm_start_ignores_different_reactor(tmp_path, phase4):
-    """New SiGe data from a DIFFERENT reactor (e.g. an AMAT tool that
+    """New SiGe data from a DIFFERENT reactor (e.g. an XYZ tool that
     hasn't been through Phase 7 transfer calibration) must not leak into
     theta_chem via warm-start either -- same filter, same guarantee."""
     from chem_ml.schema import Dataset, CanonicalRow
 
     other_reactor_rows = [CanonicalRow(
-        reactor_id="AMAT_tool_1", chem_class=ChemClass.SIGE, mode=Mode.BLANKET,
+        reactor_id="XYZ_tool_1", chem_class=ChemClass.SIGE, mode=Mode.BLANKET,
         T_K=1000.0, p_DCS=1.0, p_GeH4=0.03, p_HCl=0.5,
-        GR_nm_min=45.0, Ge_at_frac=0.20, source_dataset="amat_probe",
+        GR_nm_min=45.0, Ge_at_frac=0.20, source_dataset="xyz_probe",
     )]
     new_ds = Dataset(other_reactor_rows)
 

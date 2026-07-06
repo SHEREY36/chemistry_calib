@@ -82,7 +82,7 @@ def test_udf_arithmetic_matches_python_physics_core(tmp_path):
 
 def test_deck_roundtrip_and_output_contract(tmp_path):
     cond = CFDCondition(T_set_K=1023.15, flows_sccm={"DCS": 10.0, "GeH4": 0.3, "HCl": 5.0, "B2H6": 1e-5},
-                       P_tot_torr=10.0, geometry_id="AMAT_3D_v1")
+                       P_tot_torr=10.0, geometry_id="XYZ_3D_v1")
     deck_path = write_cfd_deck(cond, tmp_path / "deck.txt")
     deck_text = deck_path.read_text()
     assert "T1023K" in deck_text or str(cond.T_set_K) in deck_text

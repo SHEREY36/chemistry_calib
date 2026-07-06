@@ -1,4 +1,4 @@
-# CFD-ACE+ Case: SiGe via Silane/GeH4 on AMAT's 3D reactor (UNCALIBRATED SEED)
+# CFD-ACE+ Case: SiGe via Silane/GeH4 on XYZ's 3D reactor (UNCALIBRATED SEED)
 
 **Calibration status: NOT calibrated. Every rate constant in this case is a
 literature seed.** Tomasini's data (DS1-DS4, all of Phases 1-8) is 100%
@@ -27,7 +27,7 @@ that requires new experimental data (see sec. 4).
 
 | Item | Placeholder used below | Rationale |
 |---|---|---|
-| `geometry_id` | `AMAT_3D_v1` | same mesh as the DCS case, for comparability |
+| `geometry_id` | `XYZ_3D_v1` | same mesh as the DCS case, for comparability |
 | Susceptor T setpoints | 550-650 C | silane decomposes more readily than DCS; literature SiGe:silane processes commonly run 100-150C cooler than DCS-based ones for a comparable GR -- ADJUST to your actual process |
 | Total pressure | 10 Torr | kept equal to the DCS case for apples-to-apples CFD comparison; real silane SiGe can also run at lower pressure (UHV-CVD-style, <1 Torr) depending on tool -- replace with your actual spec |
 | Reference SiH4 flow | 50 sccm | arbitrary, mirrors the DCS case's reference DCS flow for comparability |

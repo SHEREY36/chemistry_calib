@@ -3,7 +3,7 @@
 A Bayesian, physics-first model of Si1-xGex vapor-phase epitaxy kinetics
 (growth rate, Ge incorporation, boron doping), calibrated end-to-end against
 Tomasini et al. (2010, *Thin Solid Films* 518, S12-S17), with a bolt-on path
-to CFD-ACE+ for reactor-specific transport (AMAT's 3D reactor) and an
+to CFD-ACE+ for reactor-specific transport (XYZ's 3D reactor) and an
 active-learning loop to minimize how many CFD runs that needs.
 
 **Start here if you're new to this repo:**
@@ -102,7 +102,7 @@ anything at all.
 
 ### "We're bringing up a new reactor tool -- does the same chemistry apply?"
 ```bash
-chem-ml add-reactor --csv amat_tool_1_wafers.csv --reactor AMAT_tool_1
+chem-ml add-reactor --csv xyz_tool_1_wafers.csv --reactor XYZ_tool_1
 ```
 Freezes the reference reactor's chemistry (`theta_chem`) and fits ONLY a
 small per-reactor offset (`alpha_HCl`, `alpha_GeH4`, plus a rate scale) on
@@ -140,7 +140,7 @@ conditions and expected-response tables: `cfd_cases/sige_dcs/CASE.md` and
 ```bash
 chem-ml active-learn --mode seed --n 8 \
   --bounds 873 1053 0.1 0.9 0.01 0.09 5 20 \
-  --geometry-id AMAT_3D_v1 --out-dir cfd_runs
+  --geometry-id XYZ_3D_v1 --out-dir cfd_runs
 ```
 `--bounds` is `T_lo T_hi HCl_ratio_lo HCl_ratio_hi GeH4_ratio_lo GeH4_ratio_hi P_lo P_hi`.
 Writes CFD-ACE+ input specifications for a Sobol space-filling seed set. Run
@@ -149,7 +149,7 @@ continue the loop from a script:
 ```python
 from chem_ml.active_learning import ActiveLearner
 from chem_ml.cfd.io import parse_cfd_output
-al = ActiveLearner(cfg, bounds, geometry_id="AMAT_3D_v1")
+al = ActiveLearner(cfg, bounds, geometry_id="XYZ_3D_v1")
 al.ingest([parse_cfd_output(csv_path, cond) for csv_path, cond in your_results])
 next_batch = al.select_batch(candidate_pool, k=3)   # GP-variance-guided, cost-weighted, diversity-penalized
 ```

@@ -48,7 +48,7 @@ CFD_OUTPUT_DIMS = ["ln_alpha_HCl", "ln_alpha_GeH4", "dT_r_K"]
 
 
 class ActiveLearner:
-    def __init__(self, cfg: Config, bounds: np.ndarray, geometry_id: str = "AMAT_3D_v1",
+    def __init__(self, cfg: Config, bounds: np.ndarray, geometry_id: str = "XYZ_3D_v1",
                 dcs_flow_sccm: float = 10.0):
         """`bounds`: (4, 2) array of [lo, hi] per CFD_INPUT_DIMS, e.g.
         [[873, 1053], [0.1, 0.9], [0.01, 0.09], [5, 20]] for a 600-780C,

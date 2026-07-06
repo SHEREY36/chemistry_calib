@@ -351,7 +351,7 @@ def main() -> None:
     p.add_argument("--n", type=int, default=8)
     p.add_argument("--bounds", type=float, nargs=8, required=True,
                   metavar=("T_LO", "T_HI", "HCL_LO", "HCL_HI", "GEH4_LO", "GEH4_HI", "P_LO", "P_HI"))
-    p.add_argument("--geometry-id", default="AMAT_3D_v1")
+    p.add_argument("--geometry-id", default="XYZ_3D_v1")
     p.add_argument("--out-dir", default="cfd_runs")
     p.set_defaults(func=cmd_active_learn)
 

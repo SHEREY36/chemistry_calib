@@ -4,7 +4,7 @@
 The system has **two physically separate layers** that must never be conflated:
 
 - **Layer A — Intrinsic chemistry** (rate constants, reaction orders, activation energies). Reactor-independent. This is what Tomasini captures. Calibrated on data. **No CFD needed.**
-- **Layer B — Reactor transport** (setpoint → local surface conditions: local `p_i`, local `T`). Reactor-*specific*. This is what changes between ASM Epsilon and AMAT's 3D reactor. **This is the only place CFD-ACE+ lives.**
+- **Layer B — Reactor transport** (setpoint → local surface conditions: local `p_i`, local `T`). Reactor-*specific*. This is what changes between ASM Epsilon and XYZ's 3D reactor. **This is the only place CFD-ACE+ lives.**
 
 Observable = `A( B(setpoint, geometry) )`. Tomasini folds `B` into constants because his data is one reactor. We keep `A` and `B` separate so the chemistry stays portable and `B` is either fit as a lumped offset (`δ_r`) or computed by CFD-ACE+.
 
@@ -14,7 +14,7 @@ The build proceeds A-first (Phases 1–8, no CFD), then bolts on B (Phases 9–1
 
 ## PHASE 0 — Repo scaffold & environment
 
-**0.1** Create the repo layout (Claude Code will split the single scaffold `.py` into these):
+**0.1** Create the repo layout (split the single scaffold `.py` into these):
 ```
 chem_ml/
   config.py            # Config dataclass, paths, hyperparameters
@@ -37,7 +37,7 @@ chem_ml/
   cli.py               # entry points
 tests/
 data/
-  raw/                 # Tomasini appendices, AMAT exports
+  raw/                 # Tomasini appendices, XYZ exports
   processed/           # canonical-schema parquet
 notebooks/
 ```
@@ -131,7 +131,7 @@ $$
 ## PHASE 7 — Reactor transfer block (Layer B, data-only version)
 
 **7.1** Implement the hierarchical `δ_r = {ΔT_r, α_{i,r}, η_r}` random effect: shared `θ_chem`, per-reactor low-dim offsets, partially pooled via hyperpriors.
-**7.2** **Cross-reactor validation:** fit `θ_chem` on DS1 (Epsilon); freeze it; fit only `δ_r` for **DS3** (Hartmann, 20 Torr) and **DS4** (Tan, 5–10 Torr). Acceptance: recover their GR/Ge within the published R² band using only the ~3–5 `δ_r` parameters. This proves portability **before** CFD and before AMAT data.
+**7.2** **Cross-reactor validation:** fit `θ_chem` on DS1 (Epsilon); freeze it; fit only `δ_r` for **DS3** (Hartmann, 20 Torr) and **DS4** (Tan, 5–10 Torr). Acceptance: recover their GR/Ge within the published R² band using only the ~3–5 `δ_r` parameters. This proves portability **before** CFD and before XYZ data.
 
 ---
 
@@ -140,7 +140,7 @@ $$
 **8.1** Implement `x* = argmin_x ‖ŷ(x;θ̄) − y*‖²_W + λ·U(x)` s.t. `x ∈ X_feasible`, using JAX gradients + a constrained optimizer (`optax` + projection, or `jaxopt`). `U(x)` = posterior predictive variance.
 **8.2** Deliver the inverse-design notebook: target spec (GR, %Ge, [B]) → recipe + confidence flag. Refuse/flag targets in low-confidence regions.
 
-> **STOP GATE.** Phases 1–8 are the full Tomasini deliverable and require **no CFD-ACE+**. Everything below is Layer B for the real AMAT reactor.
+> **STOP GATE.** Phases 1–8 are the full Tomasini deliverable and require **no CFD-ACE+**. Everything below is Layer B for the real XYZ reactor.
 
 ---
 
@@ -150,15 +150,15 @@ $$
 
 CFD-ACE+ solves the coupled **flow + heat transfer + species transport + surface chemistry** in a specific reactor geometry. In this project it does exactly two things:
 
-1. **Computes the reactor transfer map (Layer B) for AMAT's 3D reactor.** Input: inlet flows, total pressure, susceptor/lamp temperature setpoints, 3D geometry/mesh. Output: **local partial pressures and temperature at the wafer surface**, plus their **radial profile across the wafer**. This is the physics behind `δ_r` — instead of fitting `δ_r` blindly from wafers, CFD *computes* it from geometry.
+1. **Computes the reactor transfer map (Layer B) for XYZ's 3D reactor.** Input: inlet flows, total pressure, susceptor/lamp temperature setpoints, 3D geometry/mesh. Output: **local partial pressures and temperature at the wafer surface**, plus their **radial profile across the wafer**. This is the physics behind `δ_r` — instead of fitting `δ_r` blindly from wafers, CFD *computes* it from geometry.
 2. **Consumes the calibrated chemistry mechanism** (Phase 9.3) as its surface-reaction module, so its surface boundary condition is *your* chemistry.
 
 That is the whole of it. CFD-ACE+ does **not** reproduce Tomasini, does **not** calibrate rate constants (your ML does that), and is **not** surrogated. It is the geometry-aware translator between setpoints and surface conditions, and the consumer of your mechanism.
 
 ### 9.2 What CFD-ACE+ gives your model (the payoff)
 
-- **Setpoint → surface map** for AMAT's reactor → turns AMAT setpoints into the effective conditions the intrinsic chemistry sees, so `θ_chem` stays portable and doesn't have to be re-fit per reactor.
-- **Physics-based priors on `δ_r`** (`ΔT_r` from the thermal solution, `α_{i,r}` from depletion along the flow) → fewer AMAT wafers needed to pin Layer B.
+- **Setpoint → surface map** for XYZ's reactor → turns XYZ setpoints into the effective conditions the intrinsic chemistry sees, so `θ_chem` stays portable and doesn't have to be re-fit per reactor.
+- **Physics-based priors on `δ_r`** (`ΔT_r` from the thermal solution, `α_{i,r}` from depletion along the flow) → fewer XYZ wafers needed to pin Layer B.
 - **Within-wafer radial profiles** → Tomasini gives one scalar GR; CFD gives GR(r), enabling **uniformity / loading** modeling that Tomasini cannot.
 - **Synthetic training points** in expensive corners of the 3D operating space where running wafers is prohibitive.
 
