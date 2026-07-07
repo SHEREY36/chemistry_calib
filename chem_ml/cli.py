@@ -38,6 +38,8 @@ from chem_ml.workflows import register_experiment, train, validate
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("chem_ml.cli")
 
+CHEM_CLASS_CHOICES = ["Si", "Si:X", "SiGe", "SiGe:X", "SiGe:B", "SiGe:P", "SiC", "SiGeC", "SiGeC:X"]
+
 
 def _print_json(obj) -> None:
     def default(o):
@@ -212,6 +214,7 @@ def cmd_train(args: argparse.Namespace) -> None:
             strategy=strategy,
             csv_path=args.csv,
             reactor_id=args.reactor or "",
+            reference_reactor=args.reference_reactor,
             chem_class=ChemClass(args.chem_class),
             mode=Mode(args.mode),
             tag=args.tag or "",
@@ -383,7 +386,7 @@ def main() -> None:
     p.add_argument("--runs-csv", help="Spatial scan runs CSV")
     p.add_argument("--points-csv", help="Spatial scan points CSV")
     p.add_argument("--reactor", required=True)
-    p.add_argument("--chem-class", required=True, choices=["Si", "SiGe", "SiGe:B", "SiGe:P", "SiC", "SiGeC"])
+    p.add_argument("--chem-class", required=True, choices=CHEM_CLASS_CHOICES)
     p.add_argument("--tag", required=True, help="Unique source tag -- re-using one is a hard error")
     p.add_argument("--mode", default="blanket", choices=["blanket", "selective"])
     p.set_defaults(func=cmd_data_add)
@@ -394,7 +397,9 @@ def main() -> None:
                    help="Defaults to pooled for chemistry and frozen-chemistry for transfer targets")
     p.add_argument("--csv", help="Scalar CSV for warm-start or reactor-transfer training")
     p.add_argument("--reactor", help="Reactor id for scalar CSV inputs")
-    p.add_argument("--chem-class", default="SiGe", choices=["Si", "SiGe", "SiGe:B", "SiGe:P", "SiC", "SiGeC"])
+    p.add_argument("--chem-class", default="SiGe", choices=CHEM_CLASS_CHOICES)
+    p.add_argument("--reference-reactor", default="ASM_Epsilon",
+                   help="Reference reactor for class-aware pooled chemistry training")
     p.add_argument("--tag", help="Unique source tag for warm-start data, or registered spatial scan tag")
     p.add_argument("--mode", default="blanket", choices=["blanket", "selective"])
     p.add_argument("--widen-factor", type=float, default=2.0)
@@ -417,7 +422,7 @@ def main() -> None:
     p = sub.add_parser("add-data", help="Register a new CSV (standard intake format) for later pooling/warm-start")
     p.add_argument("--csv", required=True)
     p.add_argument("--reactor", required=True)
-    p.add_argument("--chem-class", required=True, choices=["Si", "SiGe", "SiGe:B", "SiGe:P", "SiC", "SiGeC"])
+    p.add_argument("--chem-class", required=True, choices=CHEM_CLASS_CHOICES)
     p.add_argument("--tag", required=True, help="Unique source tag -- re-using one is a hard error")
     p.add_argument("--mode", default="blanket", choices=["blanket", "selective"])
     p.set_defaults(func=cmd_add_data)
@@ -425,7 +430,7 @@ def main() -> None:
     p = sub.add_parser("warm-start", help="Register new data AND fold it in fast (approximate, see docs)")
     p.add_argument("--csv", required=True)
     p.add_argument("--reactor", required=True)
-    p.add_argument("--chem-class", required=True, choices=["Si", "SiGe", "SiGe:B", "SiGe:P", "SiC", "SiGeC"])
+    p.add_argument("--chem-class", required=True, choices=CHEM_CLASS_CHOICES)
     p.add_argument("--tag", required=True)
     p.add_argument("--mode", default="blanket", choices=["blanket", "selective"])
     p.add_argument("--widen-factor", type=float, default=2.0)
@@ -440,7 +445,7 @@ def main() -> None:
     p.add_argument("--runs-csv", required=True, help="One row per wafer run: run_id, T_set_C, ratios, Stick_i/probe_i cols")
     p.add_argument("--points-csv", required=True, help="One row per measured point: run_id, x_mm, y_mm, GR/Ge/thickness")
     p.add_argument("--reactor", required=True)
-    p.add_argument("--chem-class", required=True, choices=["Si", "SiGe", "SiGe:B", "SiGe:P", "SiC", "SiGeC"])
+    p.add_argument("--chem-class", required=True, choices=CHEM_CLASS_CHOICES)
     p.add_argument("--tag", required=True, help="Unique source tag -- re-using one is a hard error")
     p.set_defaults(func=cmd_add_wafer_scan)
 

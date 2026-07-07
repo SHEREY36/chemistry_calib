@@ -92,16 +92,41 @@ parameter becomes mathematically indistinguishable from a scale factor — see
 
 ## 3. Canonical features — a physically-motivated map, not a learned embedding
 
-Every row (one growth condition) is reduced to four numbers. This transform is
-**fixed by chemistry, not learned**:
+Every row (one growth condition) is reduced to a fixed feature vector. The
+first four coordinates are the legacy SiGe/Tomasini contract and are kept in
+the same order forever:
 
 $$
 p_{\text{DCS}} := 1 \quad \text{(normalization; Tomasini's own convention, Eq. 6 of the paper)}
 $$
 
 $$
-\mathbf{x} = \Big[\ \tfrac{1}{T},\ \ \ln\!\big(p_{\text{HCl}}/p_{\text{DCS}}\big),\ \ \ln\!\big(p_{\text{GeH}_4}/p_{\text{DCS}}\big),\ \ \ln\!\big(p_{\text{B}_2\text{H}_6}/p_{\text{DCS}}\big)\ \Big]
+\mathbf{x}_{1:4} = \Big[\ \tfrac{1}{T},\ \ \ln\!\big(p_{\text{HCl}}/p_{\text{Si}}\big),\ \ \ln\!\big(p_{\text{GeH}_4}/p_{\text{Si}}\big),\ \ \ln\!\big(p_{\text{B}_2\text{H}_6}/p_{\text{Si}}\big)\ \Big]
 $$
+
+where $p_{\text{Si}}$ means the declared Si-source denominator (`DCS`,
+`SiH4`, `trisilane`, etc.); for Tomasini this is exactly
+$p_{\text{DCS}} := 1$.
+
+For class-aware Si/SiGe/SiGeC intake, the builder appends process covariates
+after those four columns:
+
+$$
+\mathbf{x}_{5:10} =
+\Big[
+\ln(p_{\mathrm{MMS}}/p_{\mathrm{Si}}),\
+\ln(p_{\mathrm X}/p_{\mathrm{Si}}),\
+\ln(p_{\mathrm{H_2}}/p_{\mathrm{Si}}),\
+\ln(p_{\mathrm{N_2}}/p_{\mathrm{Si}}),\
+\mathrm{XT}_{\mathrm{H_2-N_2}}/1000,\
+\rho_{\mathrm{pattern}}
+\Big].
+$$
+
+The old GR/Ge/B models read only columns 1-4. Appending carbon, carrier, XT,
+and generic dopant features therefore does not perturb the validated SiGe
+calibration unless a class-specific model explicitly reads those appended
+slots.
 
 The choice of $1/T$ and $\ln(\text{ratio})$ is not a feature-engineering
 convenience — it is *forced* by the assumed rate law (§4): a power law in
@@ -256,6 +281,29 @@ thinnest dataset in the whole pipeline (4 free parameters $+ \sigma$ fit to 11
 points). The posterior is wide; treat $\beta_{\mathrm{B_2H_6}}$ as indicative,
 not tightly pinned. If boron control matters to the XYZ program, this is the
 first sub-model worth re-fitting on more data (§2, point 4).
+
+---
+
+### SiGeC carbon-incorporation slot — implemented, not yet production-validated
+
+For `SiGeC` / `SiGeC:X`, the pipeline adds a separate carbon target when
+measured `C_at_pct` is present:
+
+$$
+\ln\!\left(\frac{x_C}{1-x_C}\right)
+=
+\ln K_C
++ \kappa_C\widehat{\tfrac1T}
++ \gamma_{\mathrm{HCl},C}\ln\!\left(\frac{p_{\mathrm{HCl}}}{p_{\mathrm{Si}}}\right)
++ \gamma_{\mathrm{GeH_4},C}\ln\!\left(\frac{p_{\mathrm{GeH_4}}}{p_{\mathrm{Si}}}\right)
++ \gamma_{\mathrm{MMS},C}\ln\!\left(\frac{p_{\mathrm{MMS}}}{p_{\mathrm{Si}}}\right).
+$$
+
+Training is the same NUTS/MCMC pattern as §4-6, but this slot is deliberately
+gated by chemistry class and target availability: SiGeC rows without
+`C_at_pct` produce a skip report, and SiGe rows never enter the SiGeC carbon
+fit. This is a model slot for incoming SiGeC data, not a validated production
+claim until the epitaxy team supplies measured carbon-incorporation data.
 
 ---
 
@@ -436,8 +484,8 @@ $$
 y_{\log} = \underbrace{f_{\text{phys}}(\theta_{\text{chem}}; x)}_{\text{§4, frozen at posterior mean}} + \underbrace{g_{\mathrm{NN}}(\phi; x_{\text{full}})}_{\text{small MLP, this section}}
 $$
 
-**Architecture** — 2 hidden layers, 16 units, $\tanh$ activation, 7-dimensional
-input (the 4 log-features of §3 **plus** the 3 raw, non-log ratios — giving the
+**Architecture** — 2 hidden layers, 16 units, $\tanh$ activation, 13-dimensional
+input (the 10 canonical features of §3 **plus** the 3 raw, non-log ratios — giving the
 net a chance to represent curvature the log-linear core structurally cannot),
 2-dimensional output (GR residual, Ge residual):
 
@@ -445,7 +493,7 @@ $$
 g(x;\phi) = W_3 \tanh\big(W_2 \tanh(W_1 x + b_1) + b_2\big) + b_3
 $$
 
-$\approx 434$ trainable weights total — versus 4 physically-named parameters in
+$\approx 530$ trainable weights total — versus 4 physically-named parameters in
 the model it's correcting. That ratio is exactly why the regularization below
 is load-bearing, not optional.
 
@@ -509,6 +557,7 @@ split.
 | GR rate law (§4) | $T$, $p_{\mathrm{HCl}}/p_{\mathrm{DCS}}$, $p_{\mathrm{GeH_4}}/p_{\mathrm{DCS}}$ | NUTS/MCMC (Bayesian) | 4 + $\sigma$ | 70 (DS1) | full-data fit, no internal split |
 | Ge/Si rate law (§5) | same | NUTS/MCMC | 4 + $\sigma$ | 70 (DS1) | same |
 | B/Si rate law (§6) | $+\,p_{\mathrm{B_2H_6}}/p_{\mathrm{DCS}}$ | NUTS/MCMC | 4 + $\sigma$ | **11** (DS2) | full-data fit; thin |
+| SiGeC carbon slot (§6) | $T$, HCl/Si, GeH4/Si, MMS/Si, measured $C_at_pct$ | NUTS/MCMC | 5 + $\sigma$ | incoming SiGeC data only | implemented slot; not Tomasini-validated |
 | Identifiability (§7) | (Phase 4 posterior) | eigendecomp. + Fisher info | n/a | 70 (DS1) | diagnostic only |
 | Reactor transfer (§8) | same features, new reactor's rows | NUTS/MCMC, $\theta_{\text{chem}}$ frozen | 3–4 | 35 (DS3) / 18 (DS4) | **genuinely held out** |
 | Residual NN (§9) | features + raw ratios | AdamW / SGD (point estimate) | $\approx$434 | 70 (DS1) | in-sample; $\lambda$ chosen in-sample |
@@ -700,15 +749,15 @@ correction parameters differ per reactor, and those corrections never feed
 back into $\theta_{\text{chem}}$ itself, no matter how many reactors
 accumulate them.
 
-**(c) New chemistry / a new precursor** (e.g. phosphine doping, SiGe:P).
-Nothing happens at all, by design, until a human writes a new sub-model
-function. Registering a species (`add-species`) is pure metadata — inert
-until `physics_core.py` gets a new `*_logmodel`, `features.py` gets a
-matching feature column, and `pipeline.py` gets a new fit function wired to
-a new `chem_class` filter (§2's assembler/registry pattern). This genuinely
-IS a new, structurally separate model, precisely because there is no
-existing wired term for new chemistry to update — unlike (a) and (b), where
-a shared structure already exists to be updated or built upon.
+**(c) New chemistry / a new precursor.** The public schema now accepts
+`Si`, `Si:X`, `SiGe`, `SiGe:X`, `SiGeC`, and `SiGeC:X`; `SiGe:B` and
+`SiGe:P` remain legacy aliases. But accepting a row is not the same as
+claiming every chemistry is modeled. The wired model slots are still explicit:
+legacy SiGe GR/Ge/B, plus the new SiGeC carbon-incorporation slot in §6 when
+`C_at_pct` exists. Any future chemistry beyond those slots stays inert until
+`physics_core.py` gets a new `*_logmodel`, `features.py` exposes the needed
+feature column, and `pipeline.py` wires a fit function to a `chem_class`
+filter (§2's assembler/registry pattern).
 
 **Summary**: "does training on new wafers improve the Tomasini base, or spin
 up something separate" has no single answer — it depends on whether the new
@@ -753,8 +802,9 @@ filters in `pipeline.py`'s phase functions). Concretely:
   claim possible — until a human writes and validates a dedicated sub-model
   for it (§14(c)). There is no learned or automatic generalization to novel
   chemistry anywhere in this pipeline.
-- Within a chemistry class that DOES have a wired sub-model (SiGe, SiGe:B),
-  transfer is validated exactly as described above, independent of reactor.
+- Within a chemistry class that DOES have a wired sub-model (legacy SiGe/SiGe:B,
+  and now the SiGeC carbon slot when `C_at_pct` exists), transfer or class
+  fitting is only as strong as the data supporting that specific slot.
 
 **In one sentence**: this pipeline validates "does the same chemistry
 transfer to a new reactor" extremely well (that's its entire reason for

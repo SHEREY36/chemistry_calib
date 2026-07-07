@@ -22,7 +22,7 @@ def asm(reg):
 
 
 def test_registry_seeds_expected_species(reg):
-    for name in ("dichlorosilane", "germane", "hcl", "diborane", "hydrogen"):
+    for name in ("dichlorosilane", "germane", "methylsilane", "hcl", "diborane", "hydrogen", "nitrogen"):
         assert reg.get(name).canonical_name == name
     with pytest.raises(KeyError):
         reg.get("unobtainium")
@@ -45,6 +45,17 @@ def test_assemble_sigeb_with_dopant(asm):
     net = asm.assemble(ChemClass.SIGE_B, ["dichlorosilane", "germane", "hcl", "diborane"], Mode.BLANKET)
     assert net.uses_Ge_model
     assert net.uses_B_model
+
+
+def test_assemble_sigec_with_carbon_source(asm):
+    net = asm.assemble(
+        ChemClass.SIGEC,
+        ["silane", "germane", "methylsilane", "hcl"],
+        Mode.BLANKET,
+    )
+    assert net.uses_Ge_model
+    assert net.uses_C_model
+    assert net.c_source is not None
 
 
 def test_assemble_requires_si_source(asm):

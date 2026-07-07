@@ -15,6 +15,7 @@ import numpy as np
 from chem_ml.assembler import ReactionNetworkAssembler
 from chem_ml.calibration import (
     b_numpyro_model,
+    c_numpyro_model,
     diagnostics,
     ge_numpyro_model,
     gr_numpyro_model,
@@ -34,11 +35,11 @@ from chem_ml.inverse_design import (
     posterior_predictive_variance,
     stack_theta_samples,
 )
-from chem_ml.physics_core import b_logmodel, ge_logmodel, gr_logmodel
+from chem_ml.physics_core import b_logmodel, c_logmodel, ge_logmodel, gr_logmodel
 from chem_ml.reactor_transfer import reactor_transfer_model_ge_only, reactor_transfer_model_gr_ge
 from chem_ml.registry import SpeciesRegistry
 from chem_ml.residual_nn import ResidualNN, build_residual_input
-from chem_ml.schema import ChemClass, Dataset, ingest_tomasini
+from chem_ml.schema import ChemClass, Dataset, canonical_chem_class, ingest_tomasini
 from chem_ml.spatial import (
     WaferScan,
     build_spatial_features,
@@ -151,6 +152,71 @@ def run_phase4_calibration(cfg: Config, ds: Dataset | None = None) -> dict:
 
 
 _B_PARAM_NAMES = ["lnK_B", "beta_HCl", "beta_GeH4", "beta_B2H6"]
+_C_PARAM_NAMES = ["lnK_C", "kappa_C", "cgamma_HCl", "cgamma_GeH4", "cgamma_MMS"]
+
+
+def run_class_calibration(cfg: Config, ds: Dataset | None = None,
+                          chem_class: ChemClass = ChemClass.SIGE,
+                          reference_reactor: str = "ASM_Epsilon") -> dict:
+    """Class-aware pooled calibration route for non-legacy chemistry classes.
+
+    The historical ``run_phase4_calibration`` stays as the Tomasini/SiGe
+    reproduction path. This function is the maturation slot where new classes
+    can add observables without perturbing that path. First implemented slot:
+    SiGeC / SiGeC:X carbon incorporation from ``C_at_pct``.
+    """
+    if ds is None:
+        ds = load_all_datasets(cfg)
+
+    target = canonical_chem_class(chem_class)
+    selected = ds.filter_where(
+        lambda r: canonical_chem_class(r.chem_class) == target and r.reactor_id == reference_reactor
+    )
+    report = {
+        "chem_class": target.value,
+        "reference_reactor": reference_reactor,
+        "n_rows": len(selected),
+        "carbon_model_trained": False,
+    }
+    result: dict = {"report": report, "selected_dataset": selected}
+
+    if target in (ChemClass.SIGEC, ChemClass.SIGEC_X):
+        c_rows = selected.filter_where(lambda r: r.C_at_frac is not None)
+        report["n_c_rows"] = len(c_rows)
+        if len(c_rows) == 0:
+            report["carbon_skip_reason"] = "No rows with C_at_pct/C_at_frac were available."
+            return result
+
+        fb = build_features(c_rows)
+        y_c = np.array([r.C_at_frac for r in c_rows.rows])
+        y_c_log = jnp.asarray(np.log(y_c / (1.0 - y_c)))
+
+        log.info("Class calibration: fitting C incorporation for %s on %s (N=%d)...",
+                 target.value, reference_reactor, len(c_rows))
+        mcmc_c = run_mcmc(c_numpyro_model, fb.X, y_c_log, cfg)
+        diag_c = diagnostics(mcmc_c)
+        c_mu_draws = mu_draws(c_logmodel, mcmc_c, fb.X, _C_PARAM_NAMES)
+        c_ratio_pred = np.exp(np.asarray(c_mu_draws).mean(0))
+
+        report.update({
+            "carbon_model_trained": True,
+            "R2_C": r2_score(y_c / (1.0 - y_c), c_ratio_pred),
+            "diagnostics_C": diag_c,
+        })
+        result.update({
+            "mcmc_c": mcmc_c,
+            "diag_c": diag_c,
+            "features_c": fb,
+            "y_c": y_c,
+            "idata_c": az.from_numpyro(mcmc_c),
+        })
+        return result
+
+    report["class_calibration_note"] = (
+        "No class-specific observable slot is implemented for this chemistry yet; "
+        "legacy SiGe/SiGe:B reproduction remains available through run_phase4_calibration."
+    )
+    return result
 
 
 def run_phase4_warm_start(cfg: Config, previous_result: dict, new_ds: Dataset,

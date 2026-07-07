@@ -62,6 +62,7 @@ class TrainRequest:
     runs_csv: Optional[str] = None
     points_csv: Optional[str] = None
     reactor_id: str = ""
+    reference_reactor: str = "ASM_Epsilon"
     chem_class: ChemClass = ChemClass.SIGE
     mode: Mode = Mode.BLANKET
     tag: str = ""

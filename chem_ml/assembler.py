@@ -19,6 +19,7 @@ class ActiveNetwork:
     chem_class: ChemClass
     si_source: Species
     ge_source: Optional[Species]
+    c_source: Optional[Species]
     dopant: Optional[Species]
     selectivity_agent: Optional[Species]
     has_chlorine: bool
@@ -31,6 +32,10 @@ class ActiveNetwork:
     @property
     def uses_Ge_model(self) -> bool:
         return self.ge_source is not None
+
+    @property
+    def uses_C_model(self) -> bool:
+        return self.c_source is not None or self.chem_class in (ChemClass.SIGEC, ChemClass.SIGEC_X)
 
     @property
     def uses_B_model(self) -> bool:
@@ -48,12 +53,13 @@ class ReactionNetworkAssembler:
         species = [self.reg.get(n) for n in species_names]
         si = _first(species, Role.SI_SOURCE)
         ge = _first(species, Role.GE_SOURCE, required=False)
+        c = _first(species, Role.C_SOURCE, required=False)
         dop = _first(species, Role.DOPANT, required=False)
         sel = _first(species, Role.SELECTIVITY, required=False)
         if si is None:
             raise ValueError("Every recipe needs a Si source.")
         has_cl = any(s.produces_HCl for s in species)
-        return ActiveNetwork(chem_class, si, ge, dop, sel, has_cl, mode)
+        return ActiveNetwork(chem_class, si, ge, c, dop, sel, has_cl, mode)
 
 
 def _first(species: Sequence[Species], role: Role, required: bool = True) -> Optional[Species]:

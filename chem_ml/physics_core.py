@@ -64,6 +64,20 @@ def b_logmodel(params: dict, X: jnp.ndarray) -> jnp.ndarray:
             + params["beta_B2H6"] * ln_B2H6)
 
 
+def c_logmodel(params: dict, X: jnp.ndarray) -> jnp.ndarray:
+    """ln(x_C/(1-x_C)) for SiGeC carbon incorporation.
+
+    Reads only the appended carbon slot plus legacy HCl/GeH4/invT features,
+    so it is inert unless the class-specific training route selects it.
+    """
+    invT, ln_HCl, ln_GeH4, ln_C_source = X[:, 0], X[:, 1], X[:, 2], X[:, 4]
+    return (params["lnK_C"]
+            + params["kappa_C"] * invT
+            + params["cgamma_HCl"] * ln_HCl
+            + params["cgamma_GeH4"] * ln_GeH4
+            + params["cgamma_MMS"] * ln_C_source)
+
+
 def destandardize_kappa(kappa_std: float, invT_scaler: tuple[float, float]) -> float:
     """Convert learned kappa (on standardized 1/T) back to physical K units.
     Report this against Tomasini's tabulated Ea/R (expect ~ -24507 for GR)."""

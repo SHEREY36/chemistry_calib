@@ -85,11 +85,13 @@ class SpeciesRegistry:
             Species("trichlorosilane", "SiHCl3", Role.SI_SOURCE, "chlorinated",
                     n_Si=1, n_Cl=3, n_H=1, produces_HCl=True),
             Species("germane", "GeH4", Role.GE_SOURCE, "germane", n_Ge=1, n_H=4),
+            Species("methylsilane", "CH3SiH3", Role.C_SOURCE, "carbon-source", n_Si=1, n_C=1, n_H=6),
             Species("hcl", "HCl", Role.SELECTIVITY, "chlorinated", n_Cl=1, n_H=1,
                     produces_HCl=True),
             Species("diborane", "B2H6", Role.DOPANT, "dopant", n_H=6),
             Species("phosphine", "PH3", Role.DOPANT, "dopant", n_H=3),
             Species("hydrogen", "H2", Role.CARRIER, "carrier", n_H=2),
+            Species("nitrogen", "N2", Role.CARRIER, "carrier", n_H=0),
         ]:
             self._db[sp.canonical_name] = sp
 

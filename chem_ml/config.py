@@ -41,6 +41,12 @@ class PriorConfig:
     beta_HCl: tuple[float, float] = (-0.5, 0.3)
     beta_GeH4: tuple[float, float] = (-0.3, 0.3)
     beta_B2H6: tuple[float, float] = (0.8, 0.2)
+    # Carbon incorporation slot (SiGeC / SiGeC:X only)
+    lnK_C: tuple[float, float] = (0.0, 10.0)
+    kappa_C: tuple[float, float] = (0.0, 5000.0)
+    cgamma_HCl: tuple[float, float] = (0.0, 0.5)
+    cgamma_GeH4: tuple[float, float] = (0.0, 0.5)
+    cgamma_MMS: tuple[float, float] = (1.0, 0.5)
     # noise
     sigma_halfnormal: float = 0.5  # log-space observation noise scale
 

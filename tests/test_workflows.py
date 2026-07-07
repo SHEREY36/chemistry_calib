@@ -128,6 +128,43 @@ def test_train_chemistry_pooled_dispatches_to_accumulated_dataset(monkeypatch, t
     assert out["report"]["PASS"] is True
 
 
+def test_train_sigec_pooled_dispatches_to_class_calibration(monkeypatch, tmp_path):
+    calls = {}
+
+    def fake_load_accumulated_dataset(cfg):
+        calls["loaded"] = True
+        return "accumulated"
+
+    def fake_run_class_calibration(cfg, ds=None, chem_class=None, reference_reactor=None):
+        calls["class_ds"] = ds
+        calls["chem_class"] = chem_class
+        calls["reference_reactor"] = reference_reactor
+        return {"report": {"carbon_model_trained": False, "carbon_skip_reason": "No rows with C_at_pct/C_at_frac were available."}}
+
+    monkeypatch.setattr(workflows, "load_accumulated_dataset", fake_load_accumulated_dataset)
+    monkeypatch.setattr(workflows, "run_class_calibration", fake_run_class_calibration)
+
+    out = workflows.train(
+        _cfg(tmp_path),
+        TrainRequest(
+            target=TrainTarget.CHEMISTRY,
+            strategy=TrainStrategy.POOLED,
+            chem_class=ChemClass.SIGEC,
+            reference_reactor="XYZ_tool_1",
+        ),
+    )
+
+    assert calls == {
+        "loaded": True,
+        "class_ds": "accumulated",
+        "chem_class": ChemClass.SIGEC,
+        "reference_reactor": "XYZ_tool_1",
+    }
+    assert out["chem_class"] == "SiGeC"
+    assert out["reference_reactor"] == "XYZ_tool_1"
+    assert out["report"]["carbon_model_trained"] is False
+
+
 def test_validate_cfd_contract_without_file_reports_required_columns(tmp_path):
     out = workflows.validate(_cfg(tmp_path), ValidateRequest(suite=ValidationSuite.CFD_CONTRACT))
 

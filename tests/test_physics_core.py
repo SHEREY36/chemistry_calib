@@ -18,10 +18,19 @@ def ds1_features():
 
 def test_feature_columns_and_shape(ds1_features):
     fb, ds = ds1_features
-    assert fb.col_names == ["invT", "ln_HCl", "ln_GeH4", "ln_B2H6"]
-    assert fb.X.shape == (70, 4)
+    assert fb.col_names[:4] == ["invT", "ln_HCl", "ln_GeH4", "ln_B2H6"]
+    assert fb.col_names[4:] == [
+        "ln_C_source",
+        "ln_dopant",
+        "ln_H2",
+        "ln_N2",
+        "XT_H2_minus_N2_scaled",
+        "pattern_density",
+    ]
+    assert fb.X.shape == (70, 10)
     # DS1 has no B2H6 -> the placeholder column must be exactly zero.
     assert jnp.all(fb.X[:, 3] == 0.0)
+    assert jnp.all(fb.X[:, 4:] == 0.0)
 
 
 def test_invT_standardization_round_trip(ds1_features):
@@ -76,3 +85,11 @@ def test_ge_falls_with_temperature_requires_positive_kappa():
     ratio = jnp.exp(ge_logmodel(params, X))
     ratio_lo, ratio_hi = float(ratio[0]), float(ratio[1])
     assert ratio_hi < ratio_lo, "Ge/(1-Ge) must decrease with T given kappa_Ge < 0"
+
+
+def test_legacy_gr_predictions_ignore_appended_features():
+    params = {"lnK_GR": 1.0, "kappa_GR": -2.0, "gamma_HCl": -0.7, "gamma_GeH4": 1.3}
+    X_legacy = jnp.array([[0.1, -0.3, -3.0, 0.0]])
+    X_augmented = jnp.array([[0.1, -0.3, -3.0, 0.0, 8.0, -2.0, 4.0, 5.0, 1.1, 0.6]])
+
+    assert jnp.array_equal(gr_logmodel(params, X_legacy), gr_logmodel(params, X_augmented))

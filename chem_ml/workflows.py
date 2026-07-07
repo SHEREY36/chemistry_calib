@@ -37,6 +37,7 @@ from chem_ml.pipeline import (
     _GR_PARAM_NAMES,
     _run_reactor_mcmc,
     load_all_datasets,
+    run_class_calibration,
     run_phase4_calibration,
     run_phase4_warm_start,
     run_phase7_cross_reactor,
@@ -44,7 +45,7 @@ from chem_ml.pipeline import (
 )
 from chem_ml.reactor_transfer import reactor_transfer_model_ge_only, reactor_transfer_model_gr_ge
 from chem_ml.report import generate_validation_report
-from chem_ml.schema import ChemClass, Mode, ingest_standard_csv
+from chem_ml.schema import ChemClass, Mode, canonical_chem_class, ingest_standard_csv
 
 log = logging.getLogger("chem_ml.workflows")
 
@@ -60,9 +61,9 @@ def _save_posteriors(cfg: Config, result: dict) -> Path:
 
     out = Path(cfg.data_processed) / "posteriors"
     out.mkdir(parents=True, exist_ok=True)
-    az.to_netcdf(result["idata_gr"], out / "gr.nc")
-    az.to_netcdf(result["idata_ge"], out / "ge.nc")
-    az.to_netcdf(result["idata_b"], out / "b.nc")
+    for key, name in (("idata_gr", "gr.nc"), ("idata_ge", "ge.nc"), ("idata_b", "b.nc"), ("idata_c", "c.nc")):
+        if key in result:
+            az.to_netcdf(result[key], out / name)
     return out
 
 
@@ -192,11 +193,23 @@ def train(cfg: Config, request: TrainRequest) -> dict:
     if request.target == TrainTarget.CHEMISTRY:
         if request.strategy == TrainStrategy.POOLED:
             ds = load_accumulated_dataset(cfg) if request.include_registered else None
-            result = run_phase4_calibration(cfg, ds=ds)
+            target_class = canonical_chem_class(request.chem_class)
+            reference_reactor = request.reference_reactor or request.reactor_id or "ASM_Epsilon"
+            if target_class == ChemClass.SIGE and reference_reactor == "ASM_Epsilon":
+                result = run_phase4_calibration(cfg, ds=ds)
+            else:
+                result = run_class_calibration(
+                    cfg,
+                    ds=ds,
+                    chem_class=request.chem_class,
+                    reference_reactor=reference_reactor,
+                )
             response = {
                 "target": request.target.value,
                 "strategy": request.strategy.value,
                 "include_registered": request.include_registered,
+                "chem_class": target_class.value,
+                "reference_reactor": reference_reactor,
                 "report": result["report"],
                 "_model_result": result,
             }
@@ -205,6 +218,9 @@ def train(cfg: Config, request: TrainRequest) -> dict:
             return response
 
         if request.strategy == TrainStrategy.WARM_START:
+            if request.chem_class not in (ChemClass.SIGE, ChemClass.SIGE_B):
+                raise ValueError("warm-start currently supports legacy SiGe / SiGe:B data only; "
+                                 "use pooled class training for SiGeC or other chemistry classes")
             previous = run_phase4_calibration(cfg, ds=load_accumulated_dataset(cfg))
             register_experiment(
                 cfg,

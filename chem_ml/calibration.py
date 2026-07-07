@@ -14,7 +14,7 @@ import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, Predictive
 
 from chem_ml.config import Config, PriorConfig
-from chem_ml.physics_core import b_logmodel, destandardize_kappa, ge_logmodel, gr_logmodel
+from chem_ml.physics_core import b_logmodel, c_logmodel, destandardize_kappa, ge_logmodel, gr_logmodel
 
 
 def _sample_normal(name: str, ms: tuple[float, float]):
@@ -55,6 +55,19 @@ def b_numpyro_model(X: jnp.ndarray, y_log: Optional[jnp.ndarray], pri: PriorConf
     sigma = numpyro.sample("sigma_B", dist.HalfNormal(pri.sigma_halfnormal))
     mu = b_logmodel(p, X)
     numpyro.sample("obs_B", dist.Normal(mu, sigma), obs=y_log)
+
+
+def c_numpyro_model(X: jnp.ndarray, y_log: Optional[jnp.ndarray], pri: PriorConfig):
+    p = {
+        "lnK_C": _sample_normal("lnK_C", pri.lnK_C),
+        "kappa_C": _sample_normal("kappa_C", pri.kappa_C),
+        "cgamma_HCl": _sample_normal("cgamma_HCl", pri.cgamma_HCl),
+        "cgamma_GeH4": _sample_normal("cgamma_GeH4", pri.cgamma_GeH4),
+        "cgamma_MMS": _sample_normal("cgamma_MMS", pri.cgamma_MMS),
+    }
+    sigma = numpyro.sample("sigma_C", dist.HalfNormal(pri.sigma_halfnormal))
+    mu = c_logmodel(p, X)
+    numpyro.sample("obs_C", dist.Normal(mu, sigma), obs=y_log)
 
 
 def run_mcmc(model_fn: Callable, X: jnp.ndarray, y_log: jnp.ndarray, cfg: Config) -> MCMC:

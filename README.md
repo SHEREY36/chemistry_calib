@@ -35,9 +35,11 @@ right:
   `spatial-fit`'s radially-resolved one) -- closer to a frozen-backbone-plus-
   small-adapter pattern than either "improves the base" or "trains something
   independent."
-- **A new chemistry/precursor** (e.g. a new dopant): nothing happens until a
-  human writes a new sub-model -- this is the one case that's genuinely a
-  new, separate model.
+- **A new chemistry/precursor**: intake is now class-aware for `Si`, `Si:X`,
+  `SiGe`, `SiGe:X`, `SiGeC`, and `SiGeC:X`. Existing `SiGe:B` and `SiGe:P`
+  labels remain accepted aliases. Model-wise, the legacy SiGe GR/Ge/B fits
+  stay unchanged; SiGeC adds a separate carbon-incorporation slot that trains
+  only when `C_at_pct` is measured.
 
 **Validation: reactor-to-reactor? Any chemistry?** Reactor-to-reactor
 transfer IS the core validated claim (freeze the chemistry, test whether a
@@ -133,6 +135,45 @@ chem-ml train --target chemistry --strategy warm-start --csv new_wafers.csv --re
 ```
 Re-run Option A periodically even if you've been using warm-start day to
 day -- it's the ground-truth resync.
+
+### "We have SiGeC or doped SiGeC data"
+The same scalar intake command is used; the difference is the declared
+chemistry class and the columns in the CSV. For undoped SiGeC:
+
+```bash
+chem-ml data add --kind scalar \
+  --csv data/raw/sigec_reference.csv \
+  --reactor XYZ_tool_1 \
+  --chem-class SiGeC \
+  --tag sigec_reference_2026_07
+
+chem-ml train --target chemistry \
+  --strategy pooled \
+  --chem-class SiGeC \
+  --reference-reactor XYZ_tool_1 \
+  --save-posteriors
+```
+
+For generic doped SiGeC, use `SiGeC:X`; the actual dopant identity lives in
+the row-level `dopant_species` column:
+
+```bash
+chem-ml data add --kind scalar \
+  --csv data/raw/sigec_doped_reference.csv \
+  --reactor XYZ_tool_1 \
+  --chem-class SiGeC:X \
+  --tag sigecx_reference_2026_07
+
+chem-ml train --target chemistry \
+  --strategy pooled \
+  --chem-class SiGeC:X \
+  --reference-reactor XYZ_tool_1
+```
+
+If `C_at_pct` is present, the carbon slot fits
+`ln(x_C/(1-x_C))` from temperature, HCl/Si, GeH4/Si, and MMS/Si. If
+`C_at_pct` is absent, the run returns a clear skip report instead of
+pretending carbon was learned.
 
 **Anti-contamination guarantee** (tested, see `tests/test_data_store.py`):
 new data only pools into the fit it structurally matches. Data tagged a
@@ -233,7 +274,7 @@ chem-ml inference-plots    # MCMC posterior pairplot/trace, single-query credibl
 |---|---|
 | `data add --kind scalar --csv --reactor --chem-class --tag [--mode]` | Register a one-row-per-run scalar CSV for later chemistry pooling or warm-start |
 | `data add --kind spatial-scan --runs-csv --points-csv --reactor --chem-class --tag` | Register a wafer scan without mixing spatial points into scalar chemistry data |
-| `train --target chemistry --strategy pooled [--base-only] [--save-posteriors]` | Fit the chemistry model; default includes registered scalar additions, `--base-only` reproduces Tomasini only |
+| `train --target chemistry --strategy pooled [--chem-class] [--reference-reactor] [--base-only] [--save-posteriors]` | Fit the chemistry model; default includes registered scalar additions, `--base-only` reproduces Tomasini only |
 | `train --target chemistry --strategy warm-start --csv --reactor --chem-class --tag [--widen-factor]` | Register and fold in new matching chemistry data immediately |
 | `train --target reactor-transfer --csv --reactor` | Fit a per-reactor transfer offset with frozen reference chemistry |
 | `train --target spatial-transfer --tag` | Fit a radially-resolved reactor-transfer offset against a registered scan |
@@ -278,7 +319,7 @@ enough that this becomes slow, that's the point to add caching, not before.
 
 New scalar data (`data add --kind scalar` / `train --target chemistry
 --strategy warm-start`) uses one stable CSV schema, independent of Tomasini's
-own quirky per-appendix columns:
+own quirky per-appendix columns. Legacy Tomasini-shaped files still work:
 
 ```csv
 T_C,HCl_over_DCS,GeH4_over_DCS,B2H6_over_DCS,GR_nm_min,Ge_at_pct,B_conc_at_cm3
@@ -289,6 +330,37 @@ T_C,HCl_over_DCS,GeH4_over_DCS,B2H6_over_DCS,GR_nm_min,Ge_at_pct,B_conc_at_cm3
 pressures are ratios to the Si-source precursor (`p_i/p_DCS`), matching
 Tomasini's own normalization -- absolute pressure calibration is never
 needed, only internal consistency per run.
+
+Generalized Si/SiGe/SiGeC files may provide either ratios to the Si source
+or raw flows. Supported chemistry classes are `Si`, `Si:X`, `SiGe`,
+`SiGe:X`, `SiGeC`, and `SiGeC:X`; `SiGe:B` and `SiGe:P` are compatibility
+aliases for old boron/phosphine data.
+
+Recommended SiGeC raw-flow format:
+
+```csv
+run_id,T_C,Si_source,Si_source_flow_sccm,GeH4_flow_sccm,HCl_flow_sccm,MMS_flow_sccm,H2_flow_sccm,N2_flow_sccm,XT_flow_H2_minus_N2_sccm,dopant_species,dopant_flow_sccm,growth_time_s,thickness_nm,GR_nm_min,Ge_at_pct,C_at_pct,dopant_conc_at_cm3
+```
+
+Ratio-form alternative:
+
+```csv
+run_id,T_C,Si_source,HCl_over_Si,GeH4_over_Si,MMS_over_Si,dopant_species,dopant_over_Si,GR_nm_min,Ge_at_pct,C_at_pct,dopant_conc_at_cm3
+```
+
+Rules:
+- `Si_source` can be `SiH4`, `DCS`, `trisilane`, or another registered Si
+  precursor name used consistently by the team.
+- If ratio columns are absent, `Si_source_flow_sccm` is required so
+  `HCl_flow_sccm`, `GeH4_flow_sccm`, `MMS_flow_sccm`, and
+  `dopant_flow_sccm` can be normalized to the Si source.
+- `GR_nm_min` is preferred when present; otherwise it is derived from
+  `thickness_nm + growth_time_s` or `thickness_A + growth_time_s`.
+- `MMS_over_Si` / `MMS_flow_sccm` feeds the SiGeC carbon slot, but only
+  `SiGeC` / `SiGeC:X` rows with measured `C_at_pct` train that slot.
+- `XT_flow_H2_minus_N2_sccm`, `H2`, `N2`, carbon, and generic dopant fields
+  are stored as appended process features. They do not perturb the legacy
+  SiGe GR/Ge/B models unless a class-specific model explicitly reads them.
 
 **Record raw growth time on every run, even though it's not a column
 here.** GR_nm_min is expected pre-computed, but Tomasini's own DS4 (Appendix

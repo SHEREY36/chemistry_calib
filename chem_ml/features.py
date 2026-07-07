@@ -1,6 +1,10 @@
 """
-Log-space feature builder. Columns: [1/T, ln(pHCl/pDCS), ln(pGeH4/pDCS),
-ln(pB2H6/pDCS)]. Intercept handled inside the NumPyro model (lnK).
+Log-space feature builder. The first four columns are a stable public
+contract for the legacy SiGe/Tomasini models:
+    [1/T, ln(pHCl/pSi), ln(pGeH4/pSi), ln(pB2H6/pSi)]
+
+New class-aware process features are appended after those columns so old
+forward maps remain bit-stable by construction.
 """
 from __future__ import annotations
 
@@ -11,6 +15,19 @@ import numpy as np
 
 from chem_ml.schema import Dataset
 
+FEATURE_COLUMNS = [
+    "invT",
+    "ln_HCl",
+    "ln_GeH4",
+    "ln_B2H6",
+    "ln_C_source",
+    "ln_dopant",
+    "ln_H2",
+    "ln_N2",
+    "XT_H2_minus_N2_scaled",
+    "pattern_density",
+]
+
 
 @dataclass
 class FeatureBundle:
@@ -20,11 +37,21 @@ class FeatureBundle:
     invT_scaler: tuple[float, float]  # (mean, std) used to standardize 1/T
 
 
+def _safe_ln_ratio(numer: float, denom: float, *, zero_if_absent: bool = False) -> float:
+    if numer <= 0.0:
+        if zero_if_absent:
+            return 0.0
+        return float(np.log(1e-30 / denom))
+    return float(np.log(numer / denom))
+
+
 def build_features(ds: Dataset, standardize_invT: bool = True,
                    invT_scaler: tuple[float, float] | None = None) -> FeatureBundle:
-    """Columns: [1/T, ln(pHCl/pDCS), ln(pGeH4/pDCS), ln(pB2H6/pDCS)].
-    p_DCS is always 1.0 by the normalization convention in schema.py, so
-    ln(p_i/p_DCS) reduces to ln(p_i).
+    """Build the stable feature matrix.
+
+    p_DCS is retained as the normalized Si-source denominator for backward
+    compatibility; for non-DCS Si sources it is still the dimensionless
+    p_Si reference and remains 1.0 at intake.
 
     `invT_scaler`: pass an EXISTING (mean, std) to standardize against,
     instead of computing one from `ds`. Required whenever `ds` doesn't span
@@ -33,10 +60,16 @@ def build_features(ds: Dataset, standardize_invT: bool = True,
     the scaler theta_chem was actually fit against (Phase 7)."""
     rows = ds.rows
     invT = np.array([1.0 / r.T_K for r in rows])
-    ln_HCl = np.array([np.log(r.p_HCl / r.p_DCS) for r in rows])
-    ln_GeH4 = np.array([np.log(r.p_GeH4 / r.p_DCS) for r in rows])
+    ln_HCl = np.array([_safe_ln_ratio(r.p_HCl, r.p_DCS) for r in rows])
+    ln_GeH4 = np.array([_safe_ln_ratio(r.p_GeH4, r.p_DCS) for r in rows])
     # guard log(0) for B2H6 absent -> use -inf-safe: absent B just won't feed B-model
-    ln_B2H6 = np.array([np.log(r.p_B2H6 / r.p_DCS) if r.p_B2H6 > 0 else 0.0 for r in rows])
+    ln_B2H6 = np.array([_safe_ln_ratio(r.p_B2H6, r.p_DCS, zero_if_absent=True) for r in rows])
+    ln_C_source = np.array([_safe_ln_ratio(r.p_MMS, r.p_DCS, zero_if_absent=True) for r in rows])
+    ln_dopant = np.array([_safe_ln_ratio(r.p_dopant, r.p_DCS, zero_if_absent=True) for r in rows])
+    ln_H2 = np.array([_safe_ln_ratio(r.p_H2, r.p_DCS, zero_if_absent=True) for r in rows])
+    ln_N2 = np.array([_safe_ln_ratio(r.p_N2, r.p_DCS, zero_if_absent=True) for r in rows])
+    xt_scaled = np.array([r.XT_flow_H2_minus_N2_sccm / 1000.0 for r in rows])
+    pattern_density = np.array([r.pattern_density for r in rows])
 
     if invT_scaler is not None:
         mu, sd = invT_scaler
@@ -46,5 +79,16 @@ def build_features(ds: Dataset, standardize_invT: bool = True,
         mu, sd = 0.0, 1.0
     invT_s = (invT - mu) / sd
 
-    X = jnp.asarray(np.stack([invT_s, ln_HCl, ln_GeH4, ln_B2H6], axis=1))
-    return FeatureBundle(X, ["invT", "ln_HCl", "ln_GeH4", "ln_B2H6"], (mu, sd))
+    X = jnp.asarray(np.stack([
+        invT_s,
+        ln_HCl,
+        ln_GeH4,
+        ln_B2H6,
+        ln_C_source,
+        ln_dopant,
+        ln_H2,
+        ln_N2,
+        xt_scaled,
+        pattern_density,
+    ], axis=1))
+    return FeatureBundle(X, FEATURE_COLUMNS.copy(), (mu, sd))
