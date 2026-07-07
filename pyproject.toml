@@ -7,9 +7,28 @@ name = "chem-ml"
 version = "0.1.0"
 description = "Physics-ML chemistry calibration framework (Tomasini et al. 2010 SiGe VPE reproduction)"
 requires-python = ">=3.11"
+dependencies = [
+    "numpy==2.4.6",
+    "scipy==1.17.1",
+    "pandas==3.0.3",
+    "scikit-learn==1.9.0",
+    "arviz==0.23.4",
+    "matplotlib==3.11.0",
+    "jax==0.10.2",
+    "jaxlib==0.10.2",
+    "numpyro==0.21.0",
+    "equinox==0.13.8",
+    "optax==0.2.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+plots = ["matplotlib==3.11.0", "arviz==0.23.4"]
+ml = ["jax==0.10.2", "jaxlib==0.10.2", "numpyro==0.21.0", "equinox==0.13.8", "optax==0.2.8"]
 
 [project.scripts]
 chem-ml = "chem_ml.cli:main"
 
-[tool.setuptools]
-packages = ["chem_ml", "chem_ml.cfd"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["chem_ml*"]

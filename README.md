@@ -3,12 +3,15 @@
 A Bayesian, physics-first model of Si1-xGex vapor-phase epitaxy kinetics
 (growth rate, Ge incorporation, boron doping), calibrated end-to-end against
 Tomasini et al. (2010, *Thin Solid Films* 518, S12-S17), with a bolt-on path
-to CFD-ACE+ for reactor-specific transport (XYZ's 3D reactor) and an
-active-learning loop to minimize how many CFD runs that needs.
+to CFD-ACE+ for reactor-specific transport (XYZ's 3D reactor), an
+active-learning loop to minimize how many CFD runs that needs, and a
+radially-resolved spatial layer (Phase 12) that fits within-wafer
+non-uniformity directly from a reactor's own contour/XRD scans, no CFD run
+required.
 
 **Start here if you're new to this repo:**
 - `build_steps_and_cfd_integration.md` -- the original 11-phase design doc (what gets built, why, in what order)
-- `METHODOLOGY.md` -- the math of every sub-model, in plain terms: what ML method each one is (Bayesian MCMC, a small NN, a GP, plain optimization), what data it saw, what's genuinely validated vs. just fit
+- `METHODOLOGY.md` -- the math of every sub-model, in plain terms: what ML method each one is (Bayesian MCMC, a small NN, a GP, plain optimization), what data it saw, what's genuinely validated vs. just fit -- sec 14-16 answer the training/validation/usage paradigm questions directly, not just the math
 - `VALIDATION_REPORT.md` -- the actual reproduction numbers against the paper's own Tables 1-2 / Figs 2-5, regenerate with `chem-ml report`
 - `cfd_cases/sige_dcs/CASE.md` and `cfd_cases/sige_silane/CASE.md` -- two worked CFD-ACE+ input examples (one calibrated, one explicitly flagged as an uncalibrated literature-seed case)
 
@@ -17,7 +20,47 @@ in the repo root with the `epitaxy` conda env active.
 
 ---
 
-## 0. Environment
+## 1. Training, validation, and usage paradigms -- the short version
+
+**Training: does new wafer data improve the base model, or spin up a
+separate one?** Depends whose data it is -- there's no attention mechanism
+or embedding table anywhere in this pipeline, so neither analogy is quite
+right:
+- **Same reactor, same chemistry** (more ASM_Epsilon SiGe wafers): genuinely
+  improves the SAME shared posterior over the chemistry parameters
+  (`calibrate --pooled` or `warm-start`, sec 2 below).
+- **A different reactor** (e.g. XYZ), same precursor chemistry: the shared
+  chemistry is frozen and reused as-is; only a small, reactor-specific
+  correction is fit on top (`add-reactor`'s scalar offset, or
+  `spatial-fit`'s radially-resolved one) -- closer to a frozen-backbone-plus-
+  small-adapter pattern than either "improves the base" or "trains something
+  independent."
+- **A new chemistry/precursor** (e.g. a new dopant): nothing happens until a
+  human writes a new sub-model -- this is the one case that's genuinely a
+  new, separate model.
+
+**Validation: reactor-to-reactor? Any chemistry?** Reactor-to-reactor
+transfer IS the core validated claim (freeze the chemistry, test whether a
+small correction recovers a NEW reactor's data) -- it applies to any new
+reactor running the **same precursor chemistry** (DCS + GeH4 + HCl, +
+B2H6). It does **not** automatically cover "any chemistry based on the
+precursor set" -- a genuinely different Si/Ge source (e.g. silane instead of
+DCS, see `cfd_cases/sige_silane/CASE.md`'s explicit uncalibrated flag) or a
+new dopant needs its own separately fit and validated sub-model first.
+
+**Usage, for the epitaxy business unit:** predict/design recipes with a
+calibrated confidence interval instead of a bare number; qualify a new
+reactor tool on ~15-35 wafers instead of a full 70+ point sweep; diagnose
+within-wafer non-uniformity from a single scan (Phase 12, new) without a CFD
+run; hand a validated chemistry model to CFD-ACE+ for full 3D reactor design
+with a minimized number of expensive runs.
+
+Full mechanics, code paths, and the honest limits of each claim:
+**METHODOLOGY.md sec 14-16**.
+
+---
+
+## 2. Environment
 
 ```bash
 conda activate epitaxy          # Python 3.11.15, already has jax/numpyro/equinox/optax/
@@ -33,12 +76,12 @@ are relative to `Config()`'s defaults, not the package location.
 
 ---
 
-## 1. Typical workflows
+## 3. Preferred intent-based workflows
 
 ### "Does the base model still reproduce Tomasini?" (regression check)
 ```bash
-chem-ml calibrate                 # Phase 1-4: ingest + NUTS-fit, prints the acceptance report
-chem-ml report                    # Phase 1-8 end to end -> VALIDATION_REPORT.md + figures/
+chem-ml train --target chemistry --strategy pooled --base-only
+chem-ml validate --suite all --write-report
 ```
 
 ### "What GR/Ge do I expect at this recipe?"
@@ -77,16 +120,16 @@ Tomasini's Figs. 4-5.
 
 ### "The epitaxy team ran more wafers -- how do I add them?"
 Data is **never** thrown away or retrained from scratch; it accumulates.
-Put new data in the **standard intake CSV format** (see sec. 3 below), then:
+Put new data in the **standard intake CSV format** (see sec. 5 below), then:
 
 ```bash
 # Option A: register now, fold in later with a full pooled refit (exact, slower)
-chem-ml add-data --csv new_wafers.csv --reactor ASM_Epsilon --chem-class SiGe --tag batch_2026_07
-chem-ml calibrate --pooled --save-posteriors
+chem-ml data add --kind scalar --csv new_wafers.csv --reactor ASM_Epsilon --chem-class SiGe --tag batch_2026_07
+chem-ml train --target chemistry --strategy pooled --save-posteriors
 
 # Option B: register AND fold in immediately (approximate, fast -- see METHODOLOGY.md
 # / pipeline.run_phase4_warm_start docstring for exactly what "approximate" means here)
-chem-ml warm-start --csv new_wafers.csv --reactor ASM_Epsilon --chem-class SiGe --tag batch_2026_07
+chem-ml train --target chemistry --strategy warm-start --csv new_wafers.csv --reactor ASM_Epsilon --chem-class SiGe --tag batch_2026_07
 ```
 Re-run Option A periodically even if you've been using warm-start day to
 day -- it's the ground-truth resync.
@@ -102,7 +145,7 @@ anything at all.
 
 ### "We're bringing up a new reactor tool -- does the same chemistry apply?"
 ```bash
-chem-ml add-reactor --csv xyz_tool_1_wafers.csv --reactor XYZ_tool_1
+chem-ml train --target reactor-transfer --csv xyz_tool_1_wafers.csv --reactor XYZ_tool_1
 ```
 Freezes the reference reactor's chemistry (`theta_chem`) and fits ONLY a
 small per-reactor offset (`alpha_HCl`, `alpha_GeH4`, plus a rate scale) on
@@ -112,6 +155,23 @@ conditions spanning a couple of ratio levels; see METHODOLOGY.md sec 8 for
 what the recovered `alpha` values do and don't tell you on their own (short
 version: individual alpha values are not uniquely identified from wafer
 data alone -- CFD-ACE+, sec below, is what actually resolves that).
+
+### "I have a contour/radial scan from a wafer -- can I use it?"
+```bash
+chem-ml data add --kind spatial-scan --runs-csv wafer_runs.csv --points-csv wafer_points.csv \
+  --reactor XYZ_tool_1 --chem-class SiGe --tag xyz_wafer_042
+chem-ml train --target spatial-transfer --tag xyz_wafer_042
+```
+Phase 12: freezes `theta_chem` exactly like `add-reactor` above, but fits a
+**radially-resolved** offset $\delta_r(r)$ (linear in $r/R_w$) directly
+against ONE wafer's own contour or XRD line scan, instead of one scalar
+$\delta_r$ for the whole reactor. Reports predicted-vs-measured WIWNU
+(within-wafer non-uniformity) alongside R², and works from a single scan --
+no CFD-ACE+ run needed. See sec. 6 below for the CSV format and
+METHODOLOGY.md sec 13 for the math. Real XYZ scan files aren't in hand yet
+as of this writing; the ingestion/fit path is verified against synthetic
+fixtures (`tests/test_spatial.py`) and a manual smoke test matching the
+actual contour sampling pattern.
 
 ### "A new precursor/dopant shows up in our process" (e.g. phosphine, disilane)
 ```bash
@@ -167,14 +227,17 @@ chem-ml inference-plots    # MCMC posterior pairplot/trace, single-query credibl
 
 ---
 
-## 2. Full command reference
+## 4. Preferred command reference
 
 | Command | Purpose |
 |---|---|
-| `calibrate [--pooled] [--save-posteriors]` | Phase 1-4: ingest + NUTS calibration. `--pooled` includes all registered additions (data_store), not just Tomasini. `--save-posteriors` writes `data/processed/posteriors/*.nc` |
-| `add-data --csv --reactor --chem-class --tag [--mode]` | Register a new CSV (standard intake format) for later pooling |
-| `warm-start --csv --reactor --chem-class --tag [--widen-factor]` | Register AND fold in immediately (approximate, fast) |
-| `add-reactor --csv --reactor` | Phase 7: fit a per-reactor offset for a new reactor, chemistry frozen |
+| `data add --kind scalar --csv --reactor --chem-class --tag [--mode]` | Register a one-row-per-run scalar CSV for later chemistry pooling or warm-start |
+| `data add --kind spatial-scan --runs-csv --points-csv --reactor --chem-class --tag` | Register a wafer scan without mixing spatial points into scalar chemistry data |
+| `train --target chemistry --strategy pooled [--base-only] [--save-posteriors]` | Fit the chemistry model; default includes registered scalar additions, `--base-only` reproduces Tomasini only |
+| `train --target chemistry --strategy warm-start --csv --reactor --chem-class --tag [--widen-factor]` | Register and fold in new matching chemistry data immediately |
+| `train --target reactor-transfer --csv --reactor` | Fit a per-reactor transfer offset with frozen reference chemistry |
+| `train --target spatial-transfer --tag` | Fit a radially-resolved reactor-transfer offset against a registered scan |
+| `validate --suite reproduction\|transfer\|spatial\|cfd-contract\|all [--write-report]` | Run validation suites through the workflow facade |
 | `add-species --name --formula --role --family [--n-si --n-ge --n-c --n-cl --n-h --produces-hcl]` | Register a new precursor/dopant/carrier (inert until a sub-model reads it) |
 | `predict --t-c --hcl-ratio --geh4-ratio [--b2h6-ratio]` | Posterior-predictive GR/Ge at one recipe, with credible intervals |
 | `inverse --target-gr --target-ge` | Phase 8: find a recipe for a target, with confidence gating |
@@ -185,19 +248,37 @@ chem-ml inference-plots    # MCMC posterior pairplot/trace, single-query credibl
 | `plots` | Regenerate the Figs. 2-5 reproduction + calibration plots only |
 | `inference-plots` | Regenerate the posterior/credible-interval/extrapolation-comparison plots only |
 
+### Legacy aliases
+
+These still work and call the same workflow facade, but the grouped commands
+above are the preferred public surface:
+
+| Legacy command | Preferred equivalent |
+|---|---|
+| `calibrate --pooled` | `train --target chemistry --strategy pooled` |
+| `calibrate` | `train --target chemistry --strategy pooled --base-only` |
+| `add-data ...` | `data add --kind scalar ...` |
+| `warm-start ...` | `train --target chemistry --strategy warm-start ...` |
+| `add-reactor ...` | `train --target reactor-transfer ...` |
+| `add-wafer-scan ...` | `data add --kind spatial-scan ...` |
+| `spatial-fit ...` | `train --target spatial-transfer ...` |
+| `report` | `validate --suite all --write-report` |
+
 Every command that needs a fitted posterior (`predict`, `inverse`,
-`sensitivity`, `export-mechanism`, `add-reactor`) re-runs Phase 4
-calibration fresh rather than loading a cached model file -- NUTS on this
-dataset size takes single-digit seconds, so there's no serialized artifact
-to keep in sync with the data. If the accumulated dataset grows enough that
-this becomes slow, that's the point to add caching, not before.
+`sensitivity`, `export-mechanism`, `train --target reactor-transfer`,
+`train --target spatial-transfer`) re-runs
+Phase 4 calibration fresh rather than loading a cached model file -- NUTS on
+this dataset size takes single-digit seconds, so there's no serialized
+artifact to keep in sync with the data. If the accumulated dataset grows
+enough that this becomes slow, that's the point to add caching, not before.
 
 ---
 
-## 3. Standard data intake format
+## 5. Standard data intake format
 
-New data (`add-data` / `warm-start`) uses one stable CSV schema, independent
-of Tomasini's own quirky per-appendix columns:
+New scalar data (`data add --kind scalar` / `train --target chemistry
+--strategy warm-start`) uses one stable CSV schema, independent of Tomasini's
+own quirky per-appendix columns:
 
 ```csv
 T_C,HCl_over_DCS,GeH4_over_DCS,B2H6_over_DCS,GR_nm_min,Ge_at_pct,B_conc_at_cm3
@@ -216,21 +297,67 @@ hit -- it demoted an otherwise-usable dataset to Ge%-only. Don't repeat it.
 
 ---
 
-## 4. Testing
+## 6. Spatial wafer-scan intake format (Phase 12)
+
+Unlike sec. 5's one-row-per-run format, a wafer scan is one recipe -> N
+spatial measurement points, so it uses a **two-file** format
+(`data add --kind spatial-scan --runs-csv/--points-csv`) rather than being folded into
+`add-data`'s schema -- see `chem_ml/spatial.py`'s module docstring for why
+this is a deliberately PARALLEL path, not a bolt-on field (pooling raw
+spatial points through the scalar `add-data`/`add-reactor` path unmodified
+would silently pseudo-replicate one wafer's own systematic pattern as if it
+were N independent chemistry confirmations).
+
+**runs.csv** -- one row per physical wafer run:
+```csv
+run_id,T_set_C,HCl_over_DCS,GeH4_over_DCS,B2H6_over_DCS,growth_time_s,Stick_1,Stick_2,probe_1
+wafer_042,727.0,0.5,0.03,0,600,50.0,48.0,725.0
+```
+`B2H6_over_DCS`/`growth_time_s` are optional. Any column starting with
+`Stick_` (nozzle flow, sccm) or `probe_` (temperature, deg C) is captured
+generically as per-run instrumentation metadata -- the number of
+nozzles/probes varies by reactor, none are hardcoded.
+
+**points.csv** -- one row per measured location:
+```csv
+run_id,x_mm,y_mm,GR_nm_min_local,Ge_at_pct_local,thickness_A_local,measurement_source
+wafer_042,0,0,41.0,22.0,,SE_contour
+wafer_042,147,0,33.0,18.2,,SE_contour
+wafer_042,142,-38,33.5,18.4,,SE_contour
+```
+Pass `y_mm=0` for a pure radial line scan (e.g. an XRD scan from `(0,0)` to
+`(145,0)`) -- it's a subset of the general 2D contour case, not a separate
+format. `GR_nm_min_local` is optional if `thickness_A_local` + the run's
+`growth_time_s` are both present (GR is then derived, same
+thickness-over-time convention as sec. 5's DS4 note).
+
+**Nozzle/probe metadata is currently instrumentation-only** -- registered
+and carried through, but `spatial-fit` doesn't yet use it to build LOCAL
+per-point $(T, p_i)$ features (see METHODOLOGY.md sec 13); the radial trend
+is inferred purely from the measured spatial outcome pattern. Feeding
+per-nozzle/per-probe data into local features directly is a natural future
+extension, not yet built.
+
+---
+
+## 7. Testing
 
 ```bash
-pytest tests/ -q          # ~65-70 tests, ~35-45s (NUTS fits run for real, not mocked)
+pytest tests/ -q          # ~80 tests, ~55s (NUTS fits run for real, not mocked)
 ```
 Covers: unit conversion, the anti-contamination guarantee (assembler +
 data_store, both), the kappa sign convention, Phase 4's acceptance gates as
 actual assertions, cross-reactor recovery, the CFD I/O contract, the GP
-active-learning surrogate (against a synthetic stand-in), and the plotting
-code (checks files are written and non-empty / that the calibration isn't
-overconfident, not pixel content).
+active-learning surrogate (against a synthetic stand-in), the plotting code
+(checks files are written and non-empty / that the calibration isn't
+overconfident, not pixel content), and the Phase 12 spatial layer
+(`tests/test_spatial.py`: wafer-scan ingestion/registration, the
+radial-profile/WIWNU utilities against hand-computed values, and a synthetic
+planted-radial-trend recovery check for `spatial-fit`).
 
 ---
 
-## 5. Project layout
+## 8. Project layout
 
 ```
 chem_ml/
@@ -238,13 +365,14 @@ chem_ml/
   features.py       physics_core.py   residual_nn.py     calibration.py
   identifiability.py reactor_transfer.py inverse_design.py data_store.py
   active_learning.py plots.py         inference_plots.py report.py
+  spatial.py         spatial_ingest.py
   pipeline.py        cli.py
   cfd/
     mechanism.py     io.py             transfer.py
 tests/
 data/
   raw/               # Tomasini appendices (transcribed CSVs)
-  processed/         # posteriors/*.nc, additions_manifest.json, custom_species.json (all gitignored except raw)
+  processed/         # posteriors/*.nc, additions_manifest.json, spatial_manifest.json, custom_species.json (all gitignored except raw)
 cfd_cases/
   sige_dcs/          # calibrated CFD-ACE+ case
   sige_silane/        # uncalibrated-seed CFD-ACE+ case

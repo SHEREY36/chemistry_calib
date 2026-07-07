@@ -39,6 +39,13 @@ from chem_ml.reactor_transfer import reactor_transfer_model_ge_only, reactor_tra
 from chem_ml.registry import SpeciesRegistry
 from chem_ml.residual_nn import ResidualNN, build_residual_input
 from chem_ml.schema import ChemClass, Dataset, ingest_tomasini
+from chem_ml.spatial import (
+    WaferScan,
+    build_spatial_features,
+    reactor_transfer_model_spatial_ge_only,
+    reactor_transfer_model_spatial_gr_ge,
+    wiwnu,
+)
 
 log = logging.getLogger("chem_ml")
 
@@ -578,3 +585,80 @@ def run_phase8_inverse_design(cfg: Config, phase4_result: dict,
     }
     log.info("Phase 8 inverse design: %s", result)
     return result
+
+
+def run_phase12_spatial_transfer(cfg: Config, phase4_result: dict, scan: WaferScan) -> dict:
+    """Phase 12: radially-resolved generalization of Phase 7's reactor
+    transfer -- freeze theta_chem at its Phase 4 posterior mean (exactly as
+    Phase 7), but instead of one scalar delta_r for the whole reactor, fit a
+    LINEAR-IN-(r/R_w) delta_r(r) directly against ONE wafer's own radial/
+    contour scan. See spatial.py's module docstring for why the basis is
+    kept small (2 coefficients per quantity).
+
+    Assumes the scan is either fully GR-capable (every point has a GR_nm_min
+    -- direct or thickness/growth_time-derived) or has none at all (e.g. an
+    XRD-only scan with no growth_time_s to derive GR from thickness) --
+    matching reactor_transfer.py's existing gr_ge/ge_only split, not a
+    per-point missing-data mask."""
+    invT_scaler = phase4_result["features_ds1"].invT_scaler
+    theta_gr = posterior_mean_params(phase4_result["mcmc_gr"], _GR_PARAM_NAMES)
+    theta_ge = posterior_mean_params(phase4_result["mcmc_ge"], _GE_PARAM_NAMES)
+
+    X = build_spatial_features(scan, invT_scaler)
+    r_mm = scan.r_array()
+    r_over_Rw = jnp.asarray(r_mm / r_mm.max())
+
+    gr_vals = np.array([scan.effective_GR_nm_min(p) for p in scan.points], dtype=object)
+    ge_vals = np.array([p.Ge_at_frac_local for p in scan.points], dtype=object)
+    has_gr = all(v is not None for v in gr_vals)
+    has_ge = all(v is not None for v in ge_vals)
+    assert has_ge, "run_phase12_spatial_transfer requires Ge_at_frac_local at every point"
+    ge_vals = ge_vals.astype(float)
+    y_ge_log = jnp.asarray(np.log(ge_vals / (1.0 - ge_vals)))
+
+    log.info("Phase 12: fitting radial delta_r(r) for %s scan %s (N=%d points, has_gr=%s)...",
+             scan.meta.reactor_id, scan.meta.run_id, len(scan.points), has_gr)
+
+    if has_gr:
+        gr_vals = gr_vals.astype(float)
+        y_gr_log = jnp.asarray(np.log(gr_vals))
+        mcmc = _run_reactor_mcmc(
+            reactor_transfer_model_spatial_gr_ge, cfg,
+            r_over_Rw=r_over_Rw, X=X, y_gr_log=y_gr_log, y_ge_log=y_ge_log,
+            theta_gr=theta_gr, theta_ge=theta_ge,
+        )
+    else:
+        mcmc = _run_reactor_mcmc(
+            reactor_transfer_model_spatial_ge_only, cfg,
+            r_over_Rw=r_over_Rw, X=X, y_ge_log=y_ge_log, theta_ge=theta_ge,
+        )
+    diag = diagnostics(mcmc)
+    log.info("Phase 12 delta_r(r) diagnostics: %s", diag)
+    s = mcmc.get_samples()
+
+    r_over_Rw_np = np.asarray(r_over_Rw)
+    ln_alpha_HCl_r = float(jnp.mean(s["a0_alpha_HCl"])) + float(jnp.mean(s["a1_alpha_HCl"])) * r_over_Rw_np
+    ln_alpha_GeH4_r = float(jnp.mean(s["a0_alpha_GeH4"])) + float(jnp.mean(s["a1_alpha_GeH4"])) * r_over_Rw_np
+    ln_eta_Ge_r = float(jnp.mean(s["a0_eta_Ge"])) + float(jnp.mean(s["a1_eta_Ge"])) * r_over_Rw_np
+    X_eff = X.at[:, 1].add(jnp.asarray(ln_alpha_HCl_r)).at[:, 2].add(jnp.asarray(ln_alpha_GeH4_r))
+    ge_ratio_pred = np.exp(ln_eta_Ge_r + np.asarray(ge_logmodel(theta_ge, X_eff)))
+    ge_pred = ge_ratio_pred / (1 + ge_ratio_pred)
+
+    report = {
+        "run_id": scan.meta.run_id, "reactor_id": scan.meta.reactor_id, "n_points": len(scan.points),
+        "a1_alpha_HCl": float(jnp.mean(s["a1_alpha_HCl"])), "a1_alpha_GeH4": float(jnp.mean(s["a1_alpha_GeH4"])),
+        "R2_Ge": r2_score(ge_vals, ge_pred),
+        "WIWNU_measured_Ge": wiwnu(r_mm, ge_vals),
+        "WIWNU_predicted_Ge": wiwnu(r_mm, ge_pred),
+    }
+    gr_pred = None
+    if has_gr:
+        ln_eta_GR_r = float(jnp.mean(s["a0_eta_GR"])) + float(jnp.mean(s["a1_eta_GR"])) * r_over_Rw_np
+        gr_pred = np.exp(ln_eta_GR_r + np.asarray(gr_logmodel(theta_gr, X_eff)))
+        report["a1_eta_GR"] = float(jnp.mean(s["a1_eta_GR"]))
+        report["R2_GR"] = r2_score(gr_vals, gr_pred)
+        report["WIWNU_measured_GR"] = wiwnu(r_mm, gr_vals)
+        report["WIWNU_predicted_GR"] = wiwnu(r_mm, gr_pred)
+
+    log.info("Phase 12 report: %s", report)
+    return {"mcmc": mcmc, "diag": diag, "report": report, "gr_pred": gr_pred, "ge_pred": ge_pred, "r_mm": r_mm}

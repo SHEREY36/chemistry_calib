@@ -23,6 +23,17 @@ import logging
 import sys
 
 from chem_ml.config import Config
+from chem_ml.contracts import (
+    DataKind,
+    RegisterExperimentRequest,
+    TrainRequest,
+    TrainStrategy,
+    TrainTarget,
+    ValidateRequest,
+    ValidationSuite,
+)
+from chem_ml.schema import ChemClass, Mode
+from chem_ml.workflows import register_experiment, train, validate
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("chem_ml.cli")
@@ -37,117 +48,196 @@ def _print_json(obj) -> None:
     print(json.dumps(obj, indent=2, default=default))
 
 
+def _public(obj):
+    if isinstance(obj, dict):
+        return {k: _public(v) for k, v in obj.items() if not str(k).startswith("_")}
+    if isinstance(obj, list):
+        return [_public(v) for v in obj]
+    return obj
+
+
+def _enum(value: str, enum_cls):
+    return enum_cls(value.replace("-", "_"))
+
+
 # ---------------------------------------------------------------------------
 def cmd_calibrate(args: argparse.Namespace) -> None:
-    from chem_ml.pipeline import run_phase4_calibration
-    from chem_ml.data_store import load_accumulated_dataset
-
     cfg = Config()
-    if args.pooled:
-        ds = load_accumulated_dataset(cfg)
-        log.info("Calibrating against the FULL accumulated dataset (Tomasini + all registered additions)")
-    else:
-        ds = None
-        log.info("Calibrating against Tomasini only (pass --pooled to include registered additions)")
-
-    result = run_phase4_calibration(cfg, ds=ds)
+    result = train(
+        cfg,
+        TrainRequest(
+            target=TrainTarget.CHEMISTRY,
+            strategy=TrainStrategy.POOLED,
+            include_registered=args.pooled,
+            save_posteriors=args.save_posteriors,
+        ),
+    )
     _print_json(result["report"])
-
     if args.save_posteriors:
-        import arviz as az
-        from pathlib import Path
-        out = Path(cfg.data_processed) / "posteriors"
-        out.mkdir(parents=True, exist_ok=True)
-        az.to_netcdf(result["idata_gr"], out / "gr.nc")
-        az.to_netcdf(result["idata_ge"], out / "ge.nc")
-        az.to_netcdf(result["idata_b"], out / "b.nc")
-        log.info("Wrote posteriors to %s", out)
+        log.info("Wrote posteriors to %s", result["posterior_dir"])
 
 
 def cmd_add_data(args: argparse.Namespace) -> None:
-    from chem_ml.data_store import register_new_data
-    from chem_ml.schema import ChemClass, Mode
-
     cfg = Config()
-    register_new_data(cfg, args.csv, reactor_id=args.reactor, chem_class=ChemClass(args.chem_class),
-                      source_tag=args.tag, mode=Mode(args.mode))
+    register_experiment(
+        cfg,
+        RegisterExperimentRequest(
+            kind=DataKind.SCALAR,
+            csv_path=args.csv,
+            reactor_id=args.reactor,
+            chem_class=ChemClass(args.chem_class),
+            tag=args.tag,
+            mode=Mode(args.mode),
+        ),
+    )
     print(f"Registered '{args.tag}' ({args.csv}) for reactor={args.reactor}, "
           f"chem_class={args.chem_class}. Run 'calibrate --pooled' to fold it in, "
           f"or 'warm-start' for a fast approximate update.")
 
 
 def cmd_warm_start(args: argparse.Namespace) -> None:
-    from chem_ml.pipeline import run_phase4_calibration, run_phase4_warm_start
-    from chem_ml.data_store import register_new_data, load_accumulated_dataset
-    from chem_ml.schema import ChemClass, Mode, ingest_standard_csv
-
     cfg = Config()
-    log.info("Fitting previous posterior on the CURRENT accumulated dataset (pre-registration)...")
-    previous = run_phase4_calibration(cfg, ds=load_accumulated_dataset(cfg))
-
-    register_new_data(cfg, args.csv, reactor_id=args.reactor, chem_class=ChemClass(args.chem_class),
-                      source_tag=args.tag, mode=Mode(args.mode))
-    new_ds = ingest_standard_csv(args.csv, reactor_id=args.reactor, chem_class=ChemClass(args.chem_class),
-                                 mode=Mode(args.mode), source_tag=args.tag)
-
-    updated = run_phase4_warm_start(cfg, previous, new_ds, widen_factor=args.widen_factor)
-    _print_json({
-        "n_new_sige_rows": updated["n_new_sige_rows"], "n_new_sigeb_rows": updated["n_new_sigeb_rows"],
-        "warm_start_widen_factor": updated["warm_start_widen_factor"],
-    })
+    updated = train(
+        cfg,
+        TrainRequest(
+            target=TrainTarget.CHEMISTRY,
+            strategy=TrainStrategy.WARM_START,
+            csv_path=args.csv,
+            reactor_id=args.reactor,
+            chem_class=ChemClass(args.chem_class),
+            mode=Mode(args.mode),
+            tag=args.tag,
+            widen_factor=args.widen_factor,
+        ),
+    )
+    _print_json(_public(updated))
     print("Warm-start applied. Recommend a full 'calibrate --pooled' periodically as the ground-truth resync.")
 
 
 def cmd_add_reactor(args: argparse.Namespace) -> None:
     """Phase 7-style: freeze theta_chem from the reference reactor, fit
     ONLY delta_r for a brand-new reactor's data."""
-    from chem_ml.pipeline import run_phase4_calibration, _GR_PARAM_NAMES, _GE_PARAM_NAMES, _run_reactor_mcmc
-    from chem_ml.calibration import posterior_mean_params, r2_score
-    from chem_ml.features import build_features
-    from chem_ml.physics_core import gr_logmodel, ge_logmodel
-    from chem_ml.reactor_transfer import reactor_transfer_model_ge_only, reactor_transfer_model_gr_ge
-    from chem_ml.schema import ChemClass, Mode, ingest_standard_csv
-    import numpy as np
-    import jax.numpy as jnp
-
     cfg = Config()
-    base = run_phase4_calibration(cfg)
-    theta_gr = posterior_mean_params(base["mcmc_gr"], _GR_PARAM_NAMES)
-    theta_ge = posterior_mean_params(base["mcmc_ge"], _GE_PARAM_NAMES)
-    invT_scaler = base["features_ds1"].invT_scaler
+    result = train(
+        cfg,
+        TrainRequest(
+            target=TrainTarget.REACTOR_TRANSFER,
+            strategy=TrainStrategy.FROZEN_CHEMISTRY,
+            csv_path=args.csv,
+            reactor_id=args.reactor,
+            chem_class=ChemClass.SIGE,
+            mode=Mode.BLANKET,
+        ),
+    )
+    _print_json(result["report"])
 
-    ds_new = ingest_standard_csv(args.csv, reactor_id=args.reactor, chem_class=ChemClass.SIGE,
-                                 mode=Mode.BLANKET, source_tag=f"reactor:{args.reactor}")
-    fb = build_features(ds_new, invT_scaler=invT_scaler)
-    y_ge = np.array([r.Ge_at_frac for r in ds_new.rows])
-    y_ge_log = jnp.asarray(np.log(y_ge / (1.0 - y_ge)))
-    has_gr = all(r.GR_nm_min is not None for r in ds_new.rows)
 
-    if has_gr:
-        y_gr = np.array([r.GR_nm_min for r in ds_new.rows])
-        y_gr_log = jnp.asarray(np.log(y_gr))
-        mcmc = _run_reactor_mcmc(reactor_transfer_model_gr_ge, cfg, X=fb.X, y_gr_log=y_gr_log,
-                                y_ge_log=y_ge_log, theta_gr=theta_gr, theta_ge=theta_ge)
-        s = mcmc.get_samples()
-        X_eff = fb.X.at[:, 1].add(float(jnp.mean(s["ln_alpha_HCl"]))).at[:, 2].add(float(jnp.mean(s["ln_alpha_GeH4"])))
-        gr_pred = np.exp(float(jnp.mean(s["ln_eta_GR"])) + np.asarray(gr_logmodel(theta_gr, X_eff)))
-        r2_gr = r2_score(y_gr, gr_pred)
+def cmd_add_wafer_scan(args: argparse.Namespace) -> None:
+    cfg = Config()
+    register_experiment(
+        cfg,
+        RegisterExperimentRequest(
+            kind=DataKind.SPATIAL_SCAN,
+            runs_csv=args.runs_csv,
+            points_csv=args.points_csv,
+            reactor_id=args.reactor,
+            chem_class=ChemClass(args.chem_class),
+            tag=args.tag,
+        ),
+    )
+    print(f"Registered wafer scan '{args.tag}' ({args.runs_csv}, {args.points_csv}) for "
+          f"reactor={args.reactor}. Run 'spatial-fit --tag {args.tag}' to fit the radially-"
+          f"resolved reactor-transfer offset against it.")
+
+
+def cmd_spatial_fit(args: argparse.Namespace) -> None:
+    cfg = Config()
+    result = train(
+        cfg,
+        TrainRequest(
+            target=TrainTarget.SPATIAL_TRANSFER,
+            strategy=TrainStrategy.FROZEN_CHEMISTRY,
+            tag=args.tag,
+        ),
+    )
+    reports = result["reports"]
+    _print_json(reports if len(reports) > 1 else reports[0])
+
+
+def cmd_data_add(args: argparse.Namespace) -> None:
+    cfg = Config()
+    kind = _enum(args.kind, DataKind)
+    if kind == DataKind.SCALAR:
+        result = register_experiment(
+            cfg,
+            RegisterExperimentRequest(
+                kind=kind,
+                csv_path=args.csv,
+                reactor_id=args.reactor,
+                chem_class=ChemClass(args.chem_class),
+                mode=Mode(args.mode),
+                tag=args.tag,
+            ),
+        )
+    elif kind == DataKind.SPATIAL_SCAN:
+        result = register_experiment(
+            cfg,
+            RegisterExperimentRequest(
+                kind=kind,
+                runs_csv=args.runs_csv,
+                points_csv=args.points_csv,
+                reactor_id=args.reactor,
+                chem_class=ChemClass(args.chem_class),
+                tag=args.tag,
+            ),
+        )
     else:
-        mcmc = _run_reactor_mcmc(reactor_transfer_model_ge_only, cfg, X=fb.X, y_ge_log=y_ge_log, theta_ge=theta_ge)
-        s = mcmc.get_samples()
-        X_eff = fb.X.at[:, 1].add(float(jnp.mean(s["ln_alpha_HCl"]))).at[:, 2].add(float(jnp.mean(s["ln_alpha_GeH4"])))
-        r2_gr = None
-
-    ge_pred = np.exp(float(jnp.mean(s["ln_eta_Ge"])) + np.asarray(ge_logmodel(theta_ge, X_eff)))
-    r2_ge = r2_score(y_ge / (1 - y_ge), ge_pred)
-
-    result = {
-        "reactor_id": args.reactor, "n_rows": len(ds_new),
-        "ln_alpha_HCl": float(jnp.mean(s["ln_alpha_HCl"])), "ln_alpha_GeH4": float(jnp.mean(s["ln_alpha_GeH4"])),
-        "R2_GR": r2_gr, "R2_Ge": r2_ge,
-        "note": "See METHODOLOGY.md sec 8 for why individual alpha values are not uniquely identified from wafer data alone.",
-    }
+        raise ValueError("CLI data add currently supports scalar and spatial-scan inputs")
     _print_json(result)
+
+
+def cmd_train(args: argparse.Namespace) -> None:
+    cfg = Config()
+    target = _enum(args.target, TrainTarget)
+    if args.strategy:
+        strategy = _enum(args.strategy, TrainStrategy)
+    elif target == TrainTarget.CHEMISTRY:
+        strategy = TrainStrategy.POOLED
+    else:
+        strategy = TrainStrategy.FROZEN_CHEMISTRY
+    result = train(
+        cfg,
+        TrainRequest(
+            target=target,
+            strategy=strategy,
+            csv_path=args.csv,
+            reactor_id=args.reactor or "",
+            chem_class=ChemClass(args.chem_class),
+            mode=Mode(args.mode),
+            tag=args.tag or "",
+            widen_factor=args.widen_factor,
+            include_registered=not args.base_only,
+            save_posteriors=args.save_posteriors,
+        ),
+    )
+    public = _public(result)
+    if "reports" in public and len(public["reports"]) == 1:
+        public["report"] = public.pop("reports")[0]
+    _print_json(public)
+
+
+def cmd_validate(args: argparse.Namespace) -> None:
+    cfg = Config()
+    result = validate(
+        cfg,
+        ValidateRequest(
+            suite=_enum(args.suite, ValidationSuite),
+            tag=args.tag or "",
+            write_report=args.write_report,
+            report_path=args.report_path,
+        ),
+    )
+    _print_json(_public(result))
 
 
 def cmd_add_species(args: argparse.Namespace) -> None:
@@ -258,12 +348,12 @@ def cmd_active_learn(args: argparse.Namespace) -> None:
 
 
 def cmd_report(args: argparse.Namespace) -> None:
-    from chem_ml.report import generate_validation_report
-
-    report = generate_validation_report()
-    with open("VALIDATION_REPORT.md", "w") as f:
-        f.write(report)
-    print("Wrote VALIDATION_REPORT.md (with figures/ regenerated).")
+    cfg = Config()
+    result = validate(
+        cfg,
+        ValidateRequest(suite=ValidationSuite.ALL, write_report=True, report_path="VALIDATION_REPORT.md"),
+    )
+    print(f"Wrote {result['report_path']} (with figures/ regenerated).")
 
 
 def cmd_plots(args: argparse.Namespace) -> None:
@@ -284,6 +374,40 @@ def cmd_inference_plots(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="chem-ml")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_data = sub.add_parser("data", help="Intent-based data intake")
+    data_sub = p_data.add_subparsers(dest="data_command", required=True)
+    p = data_sub.add_parser("add", help="Register scalar or spatial experimental data")
+    p.add_argument("--kind", required=True, choices=["scalar", "spatial-scan"])
+    p.add_argument("--csv", help="Scalar standard-intake CSV")
+    p.add_argument("--runs-csv", help="Spatial scan runs CSV")
+    p.add_argument("--points-csv", help="Spatial scan points CSV")
+    p.add_argument("--reactor", required=True)
+    p.add_argument("--chem-class", required=True, choices=["Si", "SiGe", "SiGe:B", "SiGe:P", "SiC", "SiGeC"])
+    p.add_argument("--tag", required=True, help="Unique source tag -- re-using one is a hard error")
+    p.add_argument("--mode", default="blanket", choices=["blanket", "selective"])
+    p.set_defaults(func=cmd_data_add)
+
+    p = sub.add_parser("train", help="Intent-based training and transfer fitting")
+    p.add_argument("--target", required=True, choices=["chemistry", "reactor-transfer", "spatial-transfer"])
+    p.add_argument("--strategy", choices=["pooled", "warm-start", "frozen-chemistry"],
+                   help="Defaults to pooled for chemistry and frozen-chemistry for transfer targets")
+    p.add_argument("--csv", help="Scalar CSV for warm-start or reactor-transfer training")
+    p.add_argument("--reactor", help="Reactor id for scalar CSV inputs")
+    p.add_argument("--chem-class", default="SiGe", choices=["Si", "SiGe", "SiGe:B", "SiGe:P", "SiC", "SiGeC"])
+    p.add_argument("--tag", help="Unique source tag for warm-start data, or registered spatial scan tag")
+    p.add_argument("--mode", default="blanket", choices=["blanket", "selective"])
+    p.add_argument("--widen-factor", type=float, default=2.0)
+    p.add_argument("--base-only", action="store_true", help="For chemistry/pooled, ignore registered additions")
+    p.add_argument("--save-posteriors", action="store_true", help="Write data/processed/posteriors/*.nc")
+    p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("validate", help="Intent-based validation suites")
+    p.add_argument("--suite", required=True, choices=["reproduction", "transfer", "spatial", "cfd-contract", "all"])
+    p.add_argument("--tag", help="Registered spatial scan tag for --suite spatial")
+    p.add_argument("--write-report", action="store_true", help="For --suite all, also write the markdown report")
+    p.add_argument("--report-path", default="VALIDATION_REPORT.md")
+    p.set_defaults(func=cmd_validate)
 
     p = sub.add_parser("calibrate", help="Run Phase 1-4 ingest + Bayesian calibration")
     p.add_argument("--pooled", action="store_true", help="Include registered additions (data_store), not just Tomasini")
@@ -311,6 +435,18 @@ def main() -> None:
     p.add_argument("--csv", required=True)
     p.add_argument("--reactor", required=True)
     p.set_defaults(func=cmd_add_reactor)
+
+    p = sub.add_parser("add-wafer-scan", help="Phase 12: register a spatial wafer scan (contour/radial GR/Ge scan)")
+    p.add_argument("--runs-csv", required=True, help="One row per wafer run: run_id, T_set_C, ratios, Stick_i/probe_i cols")
+    p.add_argument("--points-csv", required=True, help="One row per measured point: run_id, x_mm, y_mm, GR/Ge/thickness")
+    p.add_argument("--reactor", required=True)
+    p.add_argument("--chem-class", required=True, choices=["Si", "SiGe", "SiGe:B", "SiGe:P", "SiC", "SiGeC"])
+    p.add_argument("--tag", required=True, help="Unique source tag -- re-using one is a hard error")
+    p.set_defaults(func=cmd_add_wafer_scan)
+
+    p = sub.add_parser("spatial-fit", help="Phase 12: fit a radially-resolved reactor-transfer offset against a registered wafer scan")
+    p.add_argument("--tag", required=True, help="source_tag a wafer scan was registered under via add-wafer-scan")
+    p.set_defaults(func=cmd_spatial_fit)
 
     p = sub.add_parser("add-species", help="Register a new precursor/dopant/carrier species")
     p.add_argument("--name", required=True)

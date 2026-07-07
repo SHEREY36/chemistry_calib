@@ -1,15 +1,21 @@
 # Methodology and Mathematics: Physics-ML Chemistry Calibration
 
-This document walks through **every sub-model** built in Phases 0–8, in math, so you
-can see exactly what kind of estimator each one is, what it structurally can and
-cannot do, what data it saw, and what was actually validated versus what was
-merely fit. The short answer to "is this black-box regression": no — the primary
-model is a 4-parameter interpretable rate law fit by full Bayesian inference
-(MCMC), and the one place a neural net appears, it is a small, heavily
-regularized *correction* bolted onto that rate law, structurally biased toward
-contributing nothing. No Gaussian Process is used anywhere in Phases 0–8 (a GP
-surrogate is reserved for the *not-yet-built* Phase 10 active-learning loop over
-CFD runs — flagging this since you asked specifically about GP/NN/MCMC).
+This document walks through **every sub-model** built in Phases 0–8 and Phase
+12, in math, so you can see exactly what kind of estimator each one is, what
+it structurally can and cannot do, what data it saw, and what was actually
+validated versus what was merely fit. The short answer to "is this black-box
+regression": no — the primary model is a 4-parameter interpretable rate law
+fit by full Bayesian inference (MCMC), and the one place a neural net
+appears, it is a small, heavily regularized *correction* bolted onto that
+rate law, structurally biased toward contributing nothing. No Gaussian
+Process is used in any sub-model below (a GP surrogate powers Phase 10's
+active-learning loop over CFD-ACE+ runs instead — `chem_ml/active_learning.py`,
+built, out of this document's scope; see README.md — flagging this since you
+asked specifically about GP/NN/MCMC). §14–16 additionally step back from the
+math to answer three operational questions directly: does new wafer data
+improve the base model or spin up a separate one (§14), does validation
+generalize reactor-to-reactor and across chemistries (§15), and what does
+this actually give the epitaxy business unit day to day (§16).
 
 ---
 
@@ -20,14 +26,20 @@ $$
 $$
 
 - $A$ = **intrinsic chemistry** — reactor-independent rate law. Fit once, on
-  Tomasini's data. This document is entirely about $A$.
+  Tomasini's data. §2–7 are entirely about $A$; §14 explains exactly when new
+  data is allowed to change it.
 - $B$ = **reactor transport** — setpoint $\to$ local surface conditions.
-  Reactor-*specific*. Phases 1–8 approximate $B$ as a small fitted offset
-  $\delta_r$ (Phase 7); Phase 9+ (not started) would replace that offset with a
-  CFD-ACE+ solve.
+  Reactor-*specific*. Phase 7 approximates $B$ as one small fitted scalar
+  offset $\delta_r$ per reactor (§8); Phase 12 (§13) generalizes that to a
+  *radially-resolved* offset $\delta_r(r)$ fit directly from one wafer's own
+  contour/XRD scan, still with $A$ frozen; Phase 9 (built —
+  `chem_ml/cfd/mechanism.py`/`transfer.py`) additionally lets a CFD-ACE+
+  solve *inform* $\delta_r$'s prior from geometry, rather than fitting it
+  blind from wafer outcomes alone.
 
-Everything below is $A$, plus the offset mechanism used to test whether $A$
-transfers to a reactor it never saw data from.
+Everything below through §13 is $A$, plus the offset mechanism(s) used to
+test whether $A$ transfers to a reactor — or a position on one wafer — it
+never saw data from.
 
 ---
 
@@ -501,11 +513,16 @@ split.
 | Reactor transfer (§8) | same features, new reactor's rows | NUTS/MCMC, $\theta_{\text{chem}}$ frozen | 3–4 | 35 (DS3) / 18 (DS4) | **genuinely held out** |
 | Residual NN (§9) | features + raw ratios | AdamW / SGD (point estimate) | $\approx$434 | 70 (DS1) | in-sample; $\lambda$ chosen in-sample |
 | Inverse design (§10) | target $(\mathrm{GR}^*, \%\mathrm{Ge}^*)$ | projected gradient descent (Adam) | n/a (per-query) | n/a | 2 spot checks |
+| Radially-resolved transfer (§13) | one wafer's own contour/XRD scan, $\theta_{\text{chem}}$ frozen | NUTS/MCMC | 8 (linear-in-$r$ basis) + 2 $\sigma$ | 1 wafer scan (synthetic recovery test; no real XYZ scan in hand yet) | genuinely held out (position-wise), same identifiability caveat as §8 |
 
-**No Gaussian Process appears anywhere above.** A GP surrogate is part of the
-*unbuilt* Phase 10 (active learning over CFD-ACE+ runs) — if/when that phase
-starts, that is where a GP would enter, as a cheap stand-in for expensive 3D
-CFD solves, not as a replacement for anything in this table.
+**No Gaussian Process appears anywhere above.** A GP surrogate powers Phase
+10's active-learning loop over CFD-ACE+ runs (`chem_ml/active_learning.py`,
+built) — that is where a GP enters, as a cheap stand-in for expensive 3D CFD
+solves, not as a replacement for anything in this table. Phases 9–11 (CFD
+mechanism export, GP-guided active learning, and the full CLI) are built and
+deliberately out of scope for this table — this document stays scoped to the
+sub-models that predict or transfer the intrinsic chemistry itself; see
+README.md for the CFD/active-learning command reference.
 
 ---
 
@@ -539,3 +556,253 @@ it is **§8's exact procedure**: freeze $\theta_{\text{chem}}$ from a DS1-scale
 sweep, fit only $\delta_r$ on a DS3/DS4-scale XYZ sample, and see if the same
 $R^2$ band holds. That is the direct, falsifiable test of "does Tomasini's
 chemistry actually describe this precursor system," independent of reactor.
+
+---
+
+## 13. Sub-model 7 (Phase 12) — Radially-resolved reactor transfer: spatial generalization of §8
+
+**Inductive bias**: identical to §8 — $\theta_{\text{chem}}$ stays **frozen**
+at its Phase 4 posterior mean. The only change is *what* the offset is
+allowed to depend on: §8's $\delta_r = \{\alpha_{\mathrm{HCl}}, \alpha_{\mathrm{GeH_4}}, \eta_{\mathrm{GR}}, \eta_{\mathrm{Ge}}\}$
+is **one number per reactor**; this section fits $\delta_r(r)$, a function
+of radial position on a *single wafer*, using that wafer's own contour or
+radial-line scan.
+
+$$
+\ln\alpha_{\mathrm{HCl}}(r) = a_0^{\mathrm{HCl}} + a_1^{\mathrm{HCl}}\cdot\frac{r}{R_w} \qquad \text{(same linear form for } \alpha_{\mathrm{GeH_4}},\ \eta_{\mathrm{GR}},\ \eta_{\mathrm{Ge}}\text{)}
+$$
+
+$$
+\ln(\mathrm{GR})(r) = \ln\eta_{\mathrm{GR}}(r) + f_{\mathrm{GR}}\big(\theta_{\text{chem}}^{\text{frozen}};\ X_{\text{eff}}(r)\big), \qquad X_{\text{eff}}(r) = X + \big[0,\ \ln\alpha_{\mathrm{HCl}}(r),\ \ln\alpha_{\mathrm{GeH_4}}(r),\ 0\big]
+$$
+
+where $X$ is the SAME feature row for every point on the wafer (every point
+was grown under one nominal recipe — $T$, $p_i$ don't vary by construction,
+only the measured *outcome* does) and $R_w$ is the outermost *measured*
+radius, not a separately-configured wafer size.
+
+**Why linear-in-$(r/R_w)$, and not richer**: a **deliberately small** basis
+(2 coefficients per quantity, 8 total + 2 noise terms), for the same reason
+§8 keeps $\delta_r$ low-dimensional: §8 already documents a $-0.97$ posterior
+correlation between $\alpha$ and $\eta$ at the *scalar* level, from only 2
+pieces of intercept information per reactor (one net GR shift, one net Ge/Si
+shift). A single wafer scan supplies more points than that, but nowhere near
+enough to identify a higher-order radial basis without the prior doing most
+of the work — a linear trend is the right amount of new flexibility for the
+physical effects it's meant to capture (gas-phase depletion along the flow,
+boundary-layer thickening toward the wafer edge), not an invitation to fit
+noise.
+
+**ML method**: NUTS/MCMC, identical machinery to §8
+(`reactor_transfer_model_spatial_gr_ge` / `_ge_only` in `chem_ml/spatial.py`,
+mirroring `reactor_transfer_model_gr_ge` / `_ge_only` in
+`chem_ml/reactor_transfer.py` line for line) — same frozen-$\theta_{\text{chem}}$
+structure, same Normal-in-log-space likelihood, just 8 sampled offset
+coefficients instead of 4.
+
+**Data**: a `WaferScan` — a **parallel data structure** to `CanonicalRow`/
+`Dataset` (`chem_ml/spatial.py`, ingested via `chem_ml/spatial_ingest.py`),
+because a contour/radial scan is fundamentally *one recipe → N spatial
+points*, and `Dataset`'s anti-contamination guarantee (§2's filtering
+discipline) assumes one-row-one-independent-observation. Pooling raw spatial
+points through the *existing* scalar `add-data`/`add-reactor` path
+unmodified would silently pseudo-replicate one wafer's own systematic
+pattern as if it were $N$ independent chemistry confirmations — the same
+contamination failure mode §2 warns about, just not caught by the existing
+`source_tag` dedup. `WaferScan.to_canonical_row()` is the deliberate seam
+that keeps §4–§8's scalar machinery fed exactly one point per wafer (a
+center-point or wafer-area-weighted-average reduction) while the full
+spatial detail is only ever consumed by this section's fit.
+
+**Derived quantities**:
+
+$$
+\overline{\mathrm{GR}} = \frac{2}{R_w^2}\int_0^{R_w} \mathrm{GR}(r)\, r\, dr, \qquad
+\mathrm{WIWNU} = \frac{\big(\max_r \mathrm{GR}(r) - \min_r \mathrm{GR}(r)\big)/2}{\overline{\mathrm{GR}}}
+$$
+
+(area-weighted wafer average and within-wafer non-uniformity, Zhang et al.
+2026's own definitions — `wafer_average`/`wiwnu` in `chem_ml/spatial.py`),
+computed on a radially-averaged profile (azimuthally-repeated points at the
+same ring are averaged first — Jäckel et al. 2024's own radial-averaging
+strategy, `radial_profile`) so a densely-sampled ring doesn't dominate the
+area integral.
+
+**Result on a synthetic recovery check** (`tests/test_spatial.py`; no real
+XYZ scan data is in hand yet, see §16's caveat): planting a known linear
+radial trend in the delivered HCl ratio and fitting it back recovers the
+correct *sign* of the trend and $R^2 > 0.9$ on both channels at low injected
+noise. On a manually-run 7-point smoke-test scan (mimicking the actual
+$(147,0), (142,-38), (104,\pm104), (69,\pm69)$ contour pattern), the fit
+converged (max R-hat $<1.001$) with $R^2_{\mathrm{GR}}=0.946$,
+$R^2_{\mathrm{Ge}}=0.964$, predicted WIWNU within 5% relative of measured
+WIWNU on both channels — but with 106 divergent transitions, i.e. this
+particular 7-point/10-parameter fit is exactly as under-determined as the
+basis-size discussion above predicts. More points per scan (a real contour
+pattern typically has more like 12+) should reduce this.
+
+**What Stick_i/probe data does NOT yet do**: `WaferRunMeta.nozzle_flows_sccm`/
+`probe_temps_K` are captured and registered, but the fit above does not yet
+use them to construct *local* per-point $(T, p_i)$ features — the radial
+trend is inferred purely from the measured spatial *outcome* pattern (GR/Ge
+vs. $r$), not from local process instrumentation. Feeding per-nozzle
+delivery splits or per-probe temperature directly into $X_{\text{eff}}(r)$
+(rather than only into the fitted $\alpha(r)$/$\eta(r)$ correction) is a
+natural next extension, not yet built.
+
+---
+
+## 14. Training paradigm: does new wafer data improve the base model, or create a separate one?
+
+Directly answering the operational question, since it's easy to conflate
+with how a neural network would behave — it doesn't behave like one. There
+is no attention mechanism, no embedding table, anywhere in this pipeline;
+every sub-model above is either closed-form Bayesian regression or a tiny
+point-estimate MLP (§9) that itself gets no special treatment for new data.
+There are three structurally different answers, depending on WHOSE data
+arrives:
+
+**(a) New data from the reference reactor, same chemistry class** (e.g. more
+ASM_Epsilon SiGe wafers). This literally sharpens/moves the SAME shared
+posterior over $\theta_{\text{chem}}$ — genuinely improving the one base
+model, not creating anything new:
+
+$$
+p(\theta_{\text{chem}} \mid \mathcal D_{\text{old}} \cup \mathcal D_{\text{new}}) \ \propto\ p(\mathcal D_{\text{new}} \mid \theta_{\text{chem}})\, p(\theta_{\text{chem}} \mid \mathcal D_{\text{old}})
+$$
+
+Two code paths, same underlying update: `chem-ml calibrate --pooled` (exact —
+a from-scratch NUTS refit on $\mathcal D_{\text{old}} \cup \mathcal D_{\text{new}}$
+with the *original* literature priors, `pipeline.run_phase4_calibration`) or
+`chem-ml warm-start` (approximate — the *previous* posterior, widened by
+`posterior_to_normal_prior`'s `widen_factor`, becomes the *new* prior, and
+only $\mathcal D_{\text{new}}$ enters the likelihood,
+`pipeline.run_phase4_warm_start`). §4's own Bayesian-regression structure
+(Gaussian likelihood, Gaussian prior, log-linear mean) is exactly what makes
+the warm-start approximation reasonable rather than an ad hoc hack
+(`calibration.posterior_to_normal_prior`'s docstring spells out why). Either
+way: same 4+4+4 parameters, same functional form, just a tighter/shifted
+posterior. `add-data`'s `(chem_class, reactor_id)` filter decides whether a
+batch of new rows lands here at all (§2's filtering discipline, tested
+directly in `tests/test_data_store.py`).
+
+**(b) New data from a DIFFERENT reactor (e.g. XYZ), same precursor
+chemistry.** $\theta_{\text{chem}}$ is never touched — by design (§8). Only a
+small, reactor-specific correction is fit and layered ON TOP of the same
+frozen chemistry: either a single scalar $\delta_r$ (`add-reactor`, §8) or,
+if a spatial scan is available, a radially-resolved $\delta_r(r)$
+(`spatial-fit`, §13). This is the closest analogue to "a different node,"
+but it is a *thin correction layered onto a shared, reused trunk* — much
+closer to a frozen-backbone-plus-small-adapter pattern than to training an
+independent model from scratch. The base chemistry ($\theta_{\text{chem}}$)
+is the SAME object for every reactor; only its 3–4 (or 8, spatial)
+correction parameters differ per reactor, and those corrections never feed
+back into $\theta_{\text{chem}}$ itself, no matter how many reactors
+accumulate them.
+
+**(c) New chemistry / a new precursor** (e.g. phosphine doping, SiGe:P).
+Nothing happens at all, by design, until a human writes a new sub-model
+function. Registering a species (`add-species`) is pure metadata — inert
+until `physics_core.py` gets a new `*_logmodel`, `features.py` gets a
+matching feature column, and `pipeline.py` gets a new fit function wired to
+a new `chem_class` filter (§2's assembler/registry pattern). This genuinely
+IS a new, structurally separate model, precisely because there is no
+existing wired term for new chemistry to update — unlike (a) and (b), where
+a shared structure already exists to be updated or built upon.
+
+**Summary**: "does training on new wafers improve the Tomasini base, or spin
+up something separate" has no single answer — it depends on whether the new
+data shares the reference reactor+chemistry (improves the shared base
+directly), a different reactor with the same chemistry (extends the shared
+base with a small, reactor- or now position-specific correction, reusing
+rather than duplicating the chemistry), or a genuinely new chemistry (needs
+an entirely new model, because nothing exists yet to extend).
+
+---
+
+## 15. Validation paradigm: reactor-to-reactor? Any chemistry?
+
+**Reactor-to-reactor: yes, this is the pipeline's core validated claim.**
+§8/§13's whole point is a falsifiable test: freeze $\theta_{\text{chem}}$,
+fit only a low-dimensional correction, and check whether the SAME reaction
+orders and activation energy — no re-fitting of the chemistry itself —
+describe a reactor (§8, validated on 2 held-out reactors, Hartmann and Tan)
+or a position on one wafer (§13) it never saw data from. The mechanism is
+reactor-agnostic by construction — $\theta_{\text{chem}}$ never takes reactor
+identity as an input (§8's closing note) — so it applies unchanged to any
+NEW reactor via `add-reactor`/`spatial-fit`, **provided that reactor uses the
+same precursor chemistry** the reference fit was calibrated on (DCS + GeH₄ +
+HCl, optionally + B₂H₆). Different absolute flows, pressures, geometry,
+susceptor design are all exactly what $\delta_r$/$\delta_r(r)$ are FOR.
+
+**"Any chemistry based on the precursor set": no, not automatically, and
+this is a deliberate design choice, not a gap to paper over.** `chem_class`
+is a hard structural gate (`registry.py`'s `Role` enum,
+`assembler.py`'s `ReactionNetworkAssembler`, and the literal `chem_class`
+filters in `pipeline.py`'s phase functions). Concretely:
+- A reactor running a **genuinely different Si/Ge source** — e.g. silane
+  instead of DCS — is NOT covered by §8/§13's transfer mechanism at all,
+  because $\theta_{\text{chem}}$'s functional form was fit exclusively on a
+  DCS-based system. `cfd_cases/sige_silane/CASE.md` is the concrete existing
+  example of exactly this limitation: its mechanism is explicitly flagged
+  `"ALL STEPS ARE UNCALIBRATED LITERATURE SEEDS"` in
+  `chem_ml/cfd/mechanism.py`'s manifest, precisely because no Tomasini data
+  covers that chemistry.
+- A **new dopant/precursor** (e.g. phosphine) can be *registered*
+  (`add-species`) but stays fully inert — no effect on GR/Ge/B, no transfer
+  claim possible — until a human writes and validates a dedicated sub-model
+  for it (§14(c)). There is no learned or automatic generalization to novel
+  chemistry anywhere in this pipeline.
+- Within a chemistry class that DOES have a wired sub-model (SiGe, SiGe:B),
+  transfer is validated exactly as described above, independent of reactor.
+
+**In one sentence**: this pipeline validates "does the same chemistry
+transfer to a new reactor" extremely well (that's its entire reason for
+existing), but it does NOT validate, or even attempt, "does some chemistry
+automatically transfer to a new precursor system" — that always requires a
+new, explicitly fit and separately validated sub-model.
+
+---
+
+## 16. Usage paradigm: what this gives the epitaxy business unit, and what changed
+
+**High-level, for a process engineer or program lead, not a modeler:**
+1. **Predict** GR/Ge (or B/Si) at any recipe with a calibrated 90% credible
+   interval, without running a wafer (`chem-ml predict`) — an honest "we are
+   this sure" number, not a bare point estimate.
+2. **Design** a recipe for a target GR/Ge%, with automatic refusal (not
+   silent extrapolation) when the target sits outside the calibrated
+   envelope (`chem-ml inverse`, §10) — protects against confidently
+   recommending a recipe nobody has ever actually validated.
+3. **Qualify a new reactor tool** on the order of 15–35 wafers (a
+   confirmatory sweep, §8) instead of a full 70+ point, 9-temperature-level
+   campaign — because only the small transfer correction needs new data,
+   not the chemistry itself.
+4. **Diagnose within-wafer non-uniformity** (WIWNU) directly from a single
+   contour or XRD radial scan (`chem-ml spatial-fit`, §13, new as of Phase
+   12) — and tell whether a non-uniformity problem looks like a
+   delivery/geometry effect (a genuine radial trend in $\delta_r(r)$) or a
+   chemistry effect, without needing a CFD-ACE+ run to say so.
+5. **Hand a validated chemistry model to CFD-ACE+** for full 3D reactor
+   design work (`chem-ml export-mechanism`), and minimize how many expensive
+   CFD-ACE+ runs a reactor-design study needs via GP-guided active learning
+   (`chem-ml active-learn`).
+
+**What changed with Phase 12, concretely — previous model vs. current:**
+
+| | Before Phase 12 | Current (with Phase 12) |
+|---|---|---|
+| Finest-grained observable | One scalar GR/Ge/[B] per wafer/condition | Same, PLUS a full radial/contour profile per wafer when a scan is available |
+| Reactor-transfer offset | One scalar $\delta_r$ for the WHOLE reactor (assumes uniform wafer) | Scalar $\delta_r$ still available (`add-reactor`), PLUS a radially-resolved $\delta_r(r)$ (`spatial-fit`) fit directly from one wafer's own scan |
+| Per-nozzle/per-probe instrumentation (`Stick_i`, probe temperatures) | No representation at all | Captured and registered (`WaferRunMeta`), though not yet fed into local per-point features (§13's closing caveat) |
+| WIWNU | Not computable at all | Predicted directly from the fitted radial profile, compared against measured WIWNU |
+| Ingesting a contour/XRD scan | Would have to be denormalized into independent scalar rows, silently pseudo-replicating one wafer's pattern (§2's contamination concern) | A dedicated parallel data path (`WaferScan`/`add-wafer-scan`) that structurally cannot leak into the scalar chemistry fit |
+| Underlying chemistry ($\theta_{\text{chem}}$) | Frozen power law, §4–6 | **Unchanged** — Phase 12 adds a spatial extension of the transfer LAYER, not a new chemistry core |
+
+The core chemistry validation claim (§4–8, §12's honest accounting) is
+untouched by Phase 12 — nothing about how well the power law itself is
+identified or validated changed. What's new is a genuinely different
+*capability*: turning a single wafer's own spatial measurement into a
+falsifiable, uncertainty-quantified statement about within-wafer uniformity,
+without requiring either a CFD-ACE+ license or a from-scratch statistical
+model for uniformity.

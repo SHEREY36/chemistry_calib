@@ -35,8 +35,12 @@ def plot_posterior_pairplot(p4: dict, out: Path) -> None:
     correlation structure between parameters (e.g. lnK_GR trades off
     against gamma_HCl/gamma_GeH4 the way any regression intercept trades
     off against its slopes)."""
+    # Avoid ArviZ's marginal KDE path here: on some conda/numba installs it
+    # tries to enable a cache for ArviZ package files and fails before any
+    # plotting happens. The pairwise hexbin panels carry the correlation
+    # structure this diagnostic is meant to show.
     axes = az.plot_pair(p4["idata_gr"], var_names=_GR_PARAM_NAMES, kind="hexbin",
-                        marginals=True, figsize=(8, 8))
+                        marginals=False, figsize=(8, 8))
     fig = np.asarray(axes).flat[0].figure
     fig.suptitle("GR model: MCMC posterior samples (4 chains x 2000 draws, pairwise)", y=1.02)
     fig.tight_layout()
@@ -49,8 +53,16 @@ def plot_trace(p4: dict, out: Path) -> None:
     """Chain-mixing trace plot -- the visual counterpart to the R-hat/ESS
     numbers already gated in Phase 4.2: well-mixed chains look like
     'fuzzy caterpillars' overlapping each other, not separated bands."""
-    axes = az.plot_trace(p4["idata_gr"], var_names=_GR_PARAM_NAMES, figsize=(10, 8))
-    fig = np.asarray(axes).flat[0].figure
+    samples = p4["mcmc_gr"].get_samples(group_by_chain=True)
+    fig, axes = plt.subplots(len(_GR_PARAM_NAMES), 1, figsize=(10, 8), sharex=True)
+    for ax, name in zip(np.asarray(axes).flat, _GR_PARAM_NAMES):
+        vals = np.asarray(samples[name])
+        for chain_idx in range(vals.shape[0]):
+            label = f"chain {chain_idx + 1}" if name == _GR_PARAM_NAMES[0] else None
+            ax.plot(vals[chain_idx], lw=0.5, alpha=0.75, label=label)
+        ax.set_ylabel(name)
+    axes[-1].set_xlabel("draw")
+    axes[0].legend(loc="upper right", ncol=4, fontsize=8)
     fig.suptitle("GR model: MCMC trace (4 chains) -- convergence check", y=1.02)
     fig.tight_layout()
     fig.savefig(out, dpi=150, bbox_inches="tight")
