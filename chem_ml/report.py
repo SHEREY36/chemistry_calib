@@ -56,6 +56,8 @@ def generate_validation_report(cfg: Config | None = None) -> str:
 
     w("## Figures")
     w("")
+    w("![Fig. 1 reproduction](figures/fig1_ds3_regime.png)")
+    w("")
     w("![Fig. 2 reproduction](figures/fig2_gr_parity.png)")
     w("")
     w("![Fig. 3 reproduction](figures/fig3_ge_parity.png)")
@@ -147,8 +149,9 @@ def generate_validation_report(cfg: Config | None = None) -> str:
     w("")
     w("- **DS4 has no growth time** in Tomasini's Appendix III, so GR cannot be computed "
       "for DS4 (only Thickness/Ge% are usable) -- DS4 is Ge/Si-only throughout this pipeline.")
-    w("- **No sccm<->ratio conversion** is available for DS1, so Phase 6's dxGe/dpGeH4 is "
-      "reported in per-unit-ratio terms only, not directly comparable to Fig. 5's per-sccm number.")
+    w("- **DS1 stores pressure ratios, not raw MFC flows**, so the Fig. 4/5 plotting code uses "
+      "one explicit effective DCS-flow conversion to place pressure-ratio derivatives on Tomasini's "
+      "sccm axes. The raw ratio-space derivatives remain the model-native quantities.")
     w("")
 
     all_pass = r4["PASS"] and r7["PASS"] and r6["dGR_dT_in_paper_1_to_2_range"]

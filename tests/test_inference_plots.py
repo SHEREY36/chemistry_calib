@@ -5,8 +5,9 @@ import pytest
 from chem_ml.config import Config
 from chem_ml.pipeline import run_phase4_calibration
 from chem_ml.inference_plots import (
-    plot_credible_interval_for_query, plot_extrapolation_superiority,
-    plot_posterior_pairplot, plot_trace,
+    plot_bayesian_response_envelope, plot_credible_interval_for_query,
+    plot_extrapolation_superiority, plot_posterior_pairplot,
+    plot_process_window_probability_map, plot_trace,
 )
 
 
@@ -46,3 +47,20 @@ def test_extrapolation_plot_shows_physics_band_growing_and_rf_frozen(tmp_path, p
     # training range, the RF's naive inter-tree band does not.
     growth_msg = next(r for r in caplog.records if "Band width AT the training edge" in r.message)
     assert "frozen" in growth_msg.message
+
+
+def test_bayesian_response_envelope_shows_extrapolation_uncertainty(tmp_path, phase4):
+    out = tmp_path / "response_envelope.png"
+    summary = plot_bayesian_response_envelope(phase4, out)
+    _assert_written(out)
+    assert summary["relative_width_growth_750C"] > 1.0
+    assert summary["max_train_geh4"] > 0
+
+
+def test_process_window_probability_map_finds_candidate_region(tmp_path, phase4):
+    out = tmp_path / "window_map.png"
+    summary = plot_process_window_probability_map(phase4, out)
+    _assert_written(out)
+    assert summary["max_target_probability"] > 0.05
+    assert summary["best_hcl_ratio"] > 0
+    assert summary["best_geh4_ratio"] > 0

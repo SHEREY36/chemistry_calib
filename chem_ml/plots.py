@@ -1,5 +1,5 @@
 """
-Reproduces Tomasini Figs. 2-5 as PNGs against our fitted model, plus a
+Reproduces Tomasini Figs. 1-5 as PNGs against the transcribed data/fitted model, plus a
 posterior-predictive calibration plot (how good is the model's own
 uncertainty quantification, not just its point predictions).
 
@@ -18,13 +18,16 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FixedFormatter, FixedLocator, NullFormatter
 
 from chem_ml.calibration import mu_draws, posterior_mean_params, posterior_predict
 from chem_ml.config import Config
 from chem_ml.physics_core import ge_logmodel, gr_logmodel
 from chem_ml.pipeline import (
+    _FIG4_GR_PAPER,
     _FIG4_HCL_RATIO,
     _FIG4_TARGET_GE,
+    _FIG4_T_C,
     _GE_PARAM_NAMES,
     _GR_PARAM_NAMES,
     load_all_datasets,
@@ -37,6 +40,15 @@ log = logging.getLogger("chem_ml")
 
 FIG_DIR = Path("figures")
 _MARKERS = {765: "o", 745: "*", 725: "D", 705: "s", 670: "P", 645: "+", 630: "x", 605: "X"}
+
+# Tomasini Figs. 4/5 report flow sensitivities, not derivatives per unit
+# pressure ratio. DS1's published/transcribed appendix gives ratios, not the
+# underlying MFC flow table, so we use one explicit effective DCS-flow
+# conversion to put derivatives on the same order-of-magnitude axes as the
+# paper: d(p_HCl/p_DCS)/d(HCl sccm)=1/F_DCS and
+# d(p_GeH4/p_DCS)/d(10% GeH4-in-H2 sccm)=0.1/F_DCS.
+_FIG45_EFFECTIVE_DCS_SCCM = 170.0
+_GEH4_DILUTION_FRACTION = 0.10
 
 
 def _marker_for(T_C: float) -> str:
@@ -115,13 +127,58 @@ def make_fig3_ge_parity(p4: dict, out: Path) -> None:
     log.info("Wrote %s", out)
 
 
+def make_fig1_ds3_regime(out: Path) -> None:
+    """Reproduce Tomasini Fig. 1: DS3 experimental GR vs GeH4/DCS, grouped
+    by fixed HCl/DCS multiples. This figure is a data/regime illustration,
+    not a fitted-model parity plot."""
+    ds3 = load_all_datasets(Config()).filter(source_dataset="DS3")
+    rows = ds3.rows
+    hcl_levels = sorted({round(r.p_HCl, 7) for r in rows})
+    f = hcl_levels[0]
+    marker_cycle = ["o", "x", "D", "s", "*"]
+
+    fig, ax = plt.subplots(figsize=(6.2, 4.7))
+    for i, hcl in enumerate(hcl_levels):
+        group = [r for r in rows if round(r.p_HCl, 7) == hcl]
+        group = sorted(group, key=lambda r: r.p_GeH4)
+        x = np.array([r.p_GeH4 for r in group])
+        y = np.array([r.GR_nm_min for r in group])
+        multiple = int(round(hcl / f))
+        label = "f" if multiple == 1 else f"{multiple}f"
+        marker = marker_cycle[i % len(marker_cycle)]
+        ax.plot(x, y, "--", color="0.25", lw=1.1, alpha=0.85)
+        ax.plot(x, y, marker, color="black", ms=6, label=label)
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(0.01, 0.2)
+    ax.set_ylim(0.8, 150)
+    ax.xaxis.set_major_locator(FixedLocator([0.01, 0.1, 0.2]))
+    ax.xaxis.set_major_formatter(FixedFormatter(["0.01", "0.1", "0.2"]))
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.yaxis.set_major_locator(FixedLocator([1, 10, 100]))
+    ax.yaxis.set_major_formatter(FixedFormatter(["1", "10", "100"]))
+    ax.yaxis.set_minor_formatter(NullFormatter())
+    ax.set_xlabel(r"$p_{\mathrm{GeH4}}/p_{\mathrm{DCS}}$")
+    ax.set_ylabel("GR exp. (nm/min)")
+    ax.text(0.014, 88, "Regime II", fontsize=14, weight="bold")
+    ax.text(0.075, 4.5, "Regime I", fontsize=14, weight="bold")
+    ax.text(0.012, 0.55, f"DS3, T=750°C, f=pHCl/pDCS={f:.4f}", fontsize=8.5,
+            transform=ax.get_xaxis_transform())
+    ax.legend(loc="lower center", ncol=5, fontsize=8, frameon=True, title="fixed HCl level")
+    ax.set_title("Fig. 1 reproduction -- DS3 GR regimes")
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    log.info("Wrote %s", out)
+
+
 def _sensitivity_curves(p4: dict):
     """Recompute the Fig. 4/5 operating points (600-750C, pHCl/pDCS=0.34,
     pGeH4/pDCS solved per-T for 20% Ge) and all three partial derivatives
-    (dT, dHCl, dGeH4) for both GR and Ge, in ratio-space units (see
-    run_phase6_identifiability's unit caveat -- no sccm<->ratio conversion
-    is available, so pHCl/pGeH4 derivatives are per-unit-ratio, not
-    per-sccm like the paper's axes)."""
+    (dT, dHCl, dGeH4) for both GR and Ge. Raw ratio-space derivatives are
+    retained, then converted to the paper's sccm axes with the explicit
+    effective-flow convention above."""
     fb1 = p4["features_ds1"]
     mu, sd = fb1.invT_scaler
     gr_params = posterior_mean_params(p4["mcmc_gr"], _GR_PARAM_NAMES)
@@ -145,36 +202,72 @@ def _sensitivity_curves(p4: dict):
         ratio = jnp.exp(ge_logmodel(ge_params, X))[0]
         return ratio / (1.0 + ratio)
 
-    T_C_grid = np.array([600.0, 650.0, 700.0, 750.0])
+    hcl_ratio_per_sccm = 1.0 / _FIG45_EFFECTIVE_DCS_SCCM
+    geh4_10_ratio_per_sccm = _GEH4_DILUTION_FRACTION / _FIG45_EFFECTIVE_DCS_SCCM
+
+    T_C_grid = np.array(_FIG4_T_C)
     rows = []
     for Tc in T_C_grid:
         T_K = Tc + 273.15
         geh4 = solve_geh4(T_K)
+        gr = float(gr_of(T_K, _FIG4_HCL_RATIO, geh4))
         dGR_dT = float(jax.grad(gr_of, argnums=0)(T_K, _FIG4_HCL_RATIO, geh4))
         dGR_dHCl = float(jax.grad(gr_of, argnums=1)(T_K, _FIG4_HCL_RATIO, geh4))
         dGR_dGeH4 = float(jax.grad(gr_of, argnums=2)(T_K, _FIG4_HCL_RATIO, geh4))
         dGe_dT = float(jax.grad(ge_of, argnums=0)(T_K, _FIG4_HCL_RATIO, geh4))
         dGe_dHCl = float(jax.grad(ge_of, argnums=1)(T_K, _FIG4_HCL_RATIO, geh4))
         dGe_dGeH4 = float(jax.grad(ge_of, argnums=2)(T_K, _FIG4_HCL_RATIO, geh4))
-        rows.append(dict(T_C=Tc, geh4_ratio=geh4,
-                         dGR_dT=dGR_dT, dGR_dHCl=dGR_dHCl, dGR_dGeH4=dGR_dGeH4,
-                         dGe_dT=dGe_dT, dGe_dHCl=dGe_dHCl, dGe_dGeH4=dGe_dGeH4))
+        rows.append(dict(
+            T_C=Tc,
+            geh4_ratio=geh4,
+            GR_nm_min=gr,
+            GR_paper_nm_min=_FIG4_GR_PAPER[float(Tc)],
+            dGR_dT=dGR_dT,
+            dGR_dHCl_ratio=dGR_dHCl,
+            dGR_dGeH4_ratio=dGR_dGeH4,
+            dGR_dHCl_sccm=dGR_dHCl * hcl_ratio_per_sccm,
+            dGR_dGeH4_10pct_sccm=dGR_dGeH4 * geh4_10_ratio_per_sccm,
+            dGe_dT_atpct=100.0 * dGe_dT,
+            dGe_dHCl_ratio=100.0 * dGe_dHCl,
+            dGe_dGeH4_ratio=100.0 * dGe_dGeH4,
+            dGe_dHCl_sccm=100.0 * dGe_dHCl * hcl_ratio_per_sccm,
+            dGe_dGeH4_10pct_sccm=100.0 * dGe_dGeH4 * geh4_10_ratio_per_sccm,
+        ))
     return rows
+
+
+def _add_geh4_top_axis(ax, rows):
+    ax_top = ax.twiny()
+    temps = [r["T_C"] for r in rows]
+    labels = [f"{r['geh4_ratio']:.3f}" for r in rows]
+    ax_top.set_xlim(ax.get_xlim())
+    ax_top.set_xticks(temps)
+    ax_top.set_xticklabels(labels)
+    ax_top.set_xlabel(r"$p_{\mathrm{GeH4}}/p_{\mathrm{DCS}}$")
+    return ax_top
 
 
 def make_fig4_gr_sensitivity(p4: dict, out: Path) -> None:
     rows = _sensitivity_curves(p4)
     T_C = [r["T_C"] for r in rows]
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot(T_C, [abs(r["dGR_dHCl"]) for r in rows], "s--", label="|dGR/d(pHCl/pDCS)|")
-    ax.plot(T_C, [abs(r["dGR_dT"]) for r in rows], "+--", label="dGR/dT (nm/min/K)")
-    ax.plot(T_C, [abs(r["dGR_dGeH4"]) for r in rows], "D--", label="dGR/d(pGeH4/pDCS)")
+    fig, ax = plt.subplots(figsize=(6.2, 4.8))
+    ax.plot(T_C, [abs(r["dGR_dHCl_sccm"]) for r in rows], "s--", color="black",
+            label=r"$-\partial GR/\partial HCl$")
+    ax.plot(T_C, [abs(r["dGR_dT"]) for r in rows], "P--", color="black",
+            label=r"$\partial GR/\partial T$")
+    ax.plot(T_C, [abs(r["dGR_dGeH4_10pct_sccm"]) for r in rows], "D--", color="black",
+            label=r"$\partial GR/\partial GeH4$")
     ax.set_yscale("log")
+    ax.set_xlim(575, 775)
+    ax.set_ylim(1e-3, 10)
+    ax.set_xticks([575, 625, 675, 725, 775])
     ax.set_xlabel("Temperature (°C)")
-    ax.set_ylabel("|partial derivative| (ratio-space units -- see caveat)")
-    ax.set_title("Fig. 4 reproduction -- GR sensitivity vs. T\n"
-                 "(pHCl/pDCS=0.34 fixed, pGeH4/pDCS solved for 20% Ge)")
-    ax.legend(fontsize=8)
+    ax.set_ylabel(r"GR K$^{-1}$ ; GR sccm$^{-1}$")
+    _add_geh4_top_axis(ax, rows)
+    ax.text(585, 1.2, r"$p_{\mathrm{HCl}}/p_{\mathrm{DCS}}=0.34$", fontsize=11, weight="bold")
+    ax.text(675, 0.004, f"flow scale: F_DCS={_FIG45_EFFECTIVE_DCS_SCCM:.0f} sccm", fontsize=7.5, color="0.35")
+    ax.set_title("Fig. 4 reproduction -- GR first partial derivatives")
+    ax.legend(fontsize=8, loc="lower right", frameon=True)
     fig.tight_layout()
     fig.savefig(out, dpi=150)
     plt.close(fig)
@@ -182,29 +275,29 @@ def make_fig4_gr_sensitivity(p4: dict, out: Path) -> None:
 
 
 def make_fig5_ge_sensitivity(p4: dict, out: Path) -> None:
-    """Dual y-axis, matching the paper's own Fig. 5 layout: d(xGe)/d(pGeH4)
-    is ~2 orders of magnitude larger than d(xGe)/d(pHCl) and d(xGe)/dT in
-    our ratio-space units (pGeH4/pDCS lives on a 0.01-0.04 scale, so its
-    derivative is correspondingly inflated) -- a single linear axis
-    squashes the other two curves to a flat line at 0, same reason the
-    paper itself split this onto two axes."""
+    """Dual y-axis, matching the paper's own Fig. 5 layout."""
     rows = _sensitivity_curves(p4)
     T_C = [r["T_C"] for r in rows]
-    fig, ax1 = plt.subplots(figsize=(6.5, 5))
+    fig, ax1 = plt.subplots(figsize=(6.2, 4.8))
     ax2 = ax1.twinx()
-    l1, = ax1.plot(T_C, [r["dGe_dHCl"] for r in rows], "s--", color="tab:blue",
-                   label="d(xGe)/d(pHCl/pDCS)  [left axis]")
-    l2, = ax1.plot(T_C, [r["dGe_dT"] for r in rows], "+--", color="tab:green",
-                   label="d(xGe)/dT (frac/K)  [left axis]")
-    l3, = ax2.plot(T_C, [r["dGe_dGeH4"] for r in rows], "D--", color="tab:orange",
-                   label="d(xGe)/d(pGeH4/pDCS)  [right axis]")
-    ax1.axhline(0, color="gray", lw=0.8)
+    l1, = ax1.plot(T_C, [r["dGe_dHCl_sccm"] for r in rows], "s--", color="black",
+                   label=r"$\partial x_{Ge}/\partial HCl$")
+    l2, = ax1.plot(T_C, [r["dGe_dT_atpct"] for r in rows], "P--", color="black",
+                   label=r"$\partial x_{Ge}/\partial T$")
+    l3, = ax2.plot(T_C, [r["dGe_dGeH4_10pct_sccm"] for r in rows], "D--", color="black",
+                   label=r"$\partial x_{Ge}/\partial GeH4$")
+    ax1.axhline(0, color="0.45", lw=0.8)
+    ax1.set_xlim(575, 775)
+    ax1.set_ylim(-0.10, 0.06)
+    ax2.set_ylim(-0.2, 0.8)
+    ax1.set_xticks([600, 650, 700, 750])
     ax1.set_xlabel("Temperature (°C)")
-    ax1.set_ylabel("d(xGe)/d(pHCl/pDCS), d(xGe)/dT")
-    ax2.set_ylabel("d(xGe)/d(pGeH4/pDCS)  [ratio-space, see caveat]")
-    ax1.set_title("Fig. 5 reproduction -- %Ge sensitivity vs. T\n"
-                  "(pHCl/pDCS=0.34 fixed, pGeH4/pDCS solved for 20% Ge)")
-    ax1.legend(handles=[l1, l2, l3], fontsize=7.5, loc="upper right")
+    ax1.set_ylabel(r"%Ge K$^{-1}$ ; %Ge sccm$^{-1}$ (HCl)")
+    ax2.set_ylabel(r"%Ge sccm$^{-1}$ (GeH4 10%)")
+    _add_geh4_top_axis(ax1, rows)
+    ax1.text(688, -0.092, r"$p_{\mathrm{HCl}}/p_{\mathrm{DCS}}=0.34$", fontsize=11, weight="bold")
+    ax1.set_title("Fig. 5 reproduction -- %Ge first partial derivatives")
+    ax1.legend(handles=[l1, l2, l3], fontsize=8, loc="center left", frameon=False)
     fig.tight_layout()
     fig.savefig(out, dpi=150)
     plt.close(fig)
@@ -258,6 +351,7 @@ def generate_all_figures(cfg: Config, p4: dict) -> dict:
     chem_ml.report so the validation report doesn't re-run MCMC a second
     time just to make plots)."""
     FIG_DIR.mkdir(exist_ok=True)
+    make_fig1_ds3_regime(FIG_DIR / "fig1_ds3_regime.png")
     make_fig2_gr_parity(p4, FIG_DIR / "fig2_gr_parity.png")
     make_fig3_ge_parity(p4, FIG_DIR / "fig3_ge_parity.png")
     make_fig4_gr_sensitivity(p4, FIG_DIR / "fig4_gr_sensitivity.png")

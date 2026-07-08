@@ -1,12 +1,14 @@
 # Tomasini et al. (2010) Reproduction: Validation Report
 
-Generated 2026-07-03T15:58:46 on Python 3.11.15.
+Generated 2026-07-08T11:13:07 on Python 3.11.15.
 
 Source: P. Tomasini, V. Machkaoutsan, S.G. Thomas, "Analysis of silicon germanium vapor phase epitaxy kinetics," *Thin Solid Films* 518 (2010) S12-S17.
 
 Dataset: 152 canonical rows ingested from the paper's appendices (DS1=70, DS2_GR=18, DS2_B=11, DS3=35, DS4=18).
 
 ## Figures
+
+![Fig. 1 reproduction](figures/fig1_ds3_regime.png)
 
 ![Fig. 2 reproduction](figures/fig2_gr_parity.png)
 
@@ -73,6 +75,6 @@ DS3's own paper GR R² (0.844) is already well below DS1's (0.985) -- that's the
 ## Known data gaps (documented, not silently worked around)
 
 - **DS4 has no growth time** in Tomasini's Appendix III, so GR cannot be computed for DS4 (only Thickness/Ge% are usable) -- DS4 is Ge/Si-only throughout this pipeline.
-- **No sccm<->ratio conversion** is available for DS1, so Phase 6's dxGe/dpGeH4 is reported in per-unit-ratio terms only, not directly comparable to Fig. 5's per-sccm number.
+- **DS1 stores pressure ratios, not raw MFC flows**, so the Fig. 4/5 plotting code uses one explicit effective DCS-flow conversion to place pressure-ratio derivatives on Tomasini's sccm axes. The raw ratio-space derivatives remain the model-native quantities.
 
 ## Summary: ALL GATES PASS

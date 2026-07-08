@@ -18,15 +18,73 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import FixedFormatter, FixedLocator, NullFormatter
 
 from chem_ml.calibration import mu_draws, posterior_predict
 from chem_ml.calibration import gr_numpyro_model
 from chem_ml.config import Config
 from chem_ml.physics_core import gr_logmodel
-from chem_ml.pipeline import _GR_PARAM_NAMES, load_all_datasets, run_phase4_calibration
+from chem_ml.pipeline import _GE_PARAM_NAMES, _GR_PARAM_NAMES, load_all_datasets, run_phase4_calibration
 
 log = logging.getLogger("chem_ml")
 FIG_DIR = Path("figures")
+_PRESENTATION_DRAWS = 1000
+
+
+def _subset_samples(mcmc, names: list[str], max_draws: int = _PRESENTATION_DRAWS) -> dict[str, np.ndarray]:
+    samples = mcmc.get_samples()
+    n = len(samples[names[0]])
+    idx = np.linspace(0, n - 1, min(max_draws, n), dtype=int)
+    return {name: np.asarray(samples[name])[idx] for name in names}
+
+
+def _make_feature_matrix(invT_scaler: tuple[float, float], T_C, hcl_ratio, geh4_ratio) -> np.ndarray:
+    T_C = np.asarray(T_C, dtype=float)
+    hcl_ratio = np.asarray(hcl_ratio, dtype=float)
+    geh4_ratio = np.asarray(geh4_ratio, dtype=float)
+    T_C, hcl_ratio, geh4_ratio = np.broadcast_arrays(T_C, hcl_ratio, geh4_ratio)
+    mu, sd = invT_scaler
+    invT_std = (1.0 / (T_C + 273.15) - mu) / sd
+    return np.stack([
+        invT_std.ravel(),
+        np.log(hcl_ratio.ravel()),
+        np.log(geh4_ratio.ravel()),
+        np.zeros(invT_std.size),
+    ], axis=1)
+
+
+def _gr_draws_from_samples(samples: dict[str, np.ndarray], X: np.ndarray) -> np.ndarray:
+    return np.exp(
+        samples["lnK_GR"][:, None]
+        + samples["kappa_GR"][:, None] * X[None, :, 0]
+        + samples["gamma_HCl"][:, None] * X[None, :, 1]
+        + samples["gamma_GeH4"][:, None] * X[None, :, 2]
+    )
+
+
+def _ge_draws_from_samples(samples: dict[str, np.ndarray], X: np.ndarray) -> np.ndarray:
+    ge_ratio = np.exp(
+        samples["lnK_Ge"][:, None]
+        + samples["kappa_Ge"][:, None] * X[None, :, 0]
+        + samples["dgamma_HCl"][:, None] * X[None, :, 1]
+        + samples["dgamma_GeH4"][:, None] * X[None, :, 2]
+    )
+    return ge_ratio / (1.0 + ge_ratio)
+
+
+def _draw_summary(draws: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return tuple(np.percentile(draws, [5, 50, 95], axis=0))
+
+
+def _set_ratio_ticks(ax, *, x_ticks: list[float] | None = None, y_ticks: list[float] | None = None) -> None:
+    if x_ticks is not None:
+        ax.xaxis.set_major_locator(FixedLocator(x_ticks))
+        ax.xaxis.set_major_formatter(FixedFormatter([f"{t:.2f}" for t in x_ticks]))
+        ax.xaxis.set_minor_formatter(NullFormatter())
+    if y_ticks is not None:
+        ax.yaxis.set_major_locator(FixedLocator(y_ticks))
+        ax.yaxis.set_major_formatter(FixedFormatter([f"{t:.2f}" for t in y_ticks]))
+        ax.yaxis.set_minor_formatter(NullFormatter())
 
 
 def plot_posterior_pairplot(p4: dict, out: Path) -> None:
@@ -198,6 +256,155 @@ def plot_extrapolation_superiority(p4: dict, out: Path) -> None:
             rf_width_edge, rf_width_end, rf_width_end / rf_width_edge)
 
 
+def plot_bayesian_response_envelope(p4: dict, out: Path) -> dict:
+    """Presentation plot: sweep GeH4/DCS at fixed HCl/DCS and show the family
+    of GR curves allowed by the posterior.
+
+    This is more useful than a raw posterior pairplot for non-statisticians:
+    it turns parameter uncertainty into a process statement. Inside the DS1
+    envelope the band is tight; beyond the edge, the mean still follows the
+    physically constrained power law but the band widens instead of pretending
+    the extrapolation is just as well known as the calibration region."""
+    ds1 = load_all_datasets(Config()).filter(source_dataset="DS1")
+    fb1 = p4["features_ds1"]
+    gr_samples = _subset_samples(p4["mcmc_gr"], _GR_PARAM_NAMES)
+
+    geh4_train = np.array([r.p_GeH4 for r in ds1.rows])
+    hcl_train = np.array([r.p_HCl for r in ds1.rows])
+    gr_train = np.array([r.GR_nm_min for r in ds1.rows])
+    max_geh4 = float(geh4_train.max())
+
+    hcl_fixed = 0.34
+    T_grid = [650.0, 700.0, 750.0]
+    geh4_sweep = np.geomspace(max(0.006, geh4_train.min() * 0.7), max_geh4 * 2.5, 180)
+    colors = ["tab:green", "tab:orange", "tab:blue"]
+
+    fig, (ax_pred, ax_uq) = plt.subplots(1, 2, figsize=(12.0, 4.8), sharex=True)
+    metrics = {"max_train_geh4": max_geh4, "hcl_fixed": hcl_fixed, "temperatures_C": T_grid}
+
+    for T_C, color in zip(T_grid, colors):
+        X = _make_feature_matrix(fb1.invT_scaler, T_C, hcl_fixed, geh4_sweep)
+        draws = _gr_draws_from_samples(gr_samples, X)
+        lo, med, hi = _draw_summary(draws)
+        rel_width = (hi - lo) / med
+        edge_idx = int(np.argmin(np.abs(geh4_sweep - max_geh4)))
+        metrics[f"relative_width_growth_{int(T_C)}C"] = float(rel_width[-1] / rel_width[edge_idx])
+
+        label = f"{T_C:.0f} C posterior median"
+        ax_pred.plot(geh4_sweep, med, color=color, lw=2, label=label)
+        ax_pred.fill_between(geh4_sweep, lo, hi, color=color, alpha=0.18)
+        ax_uq.plot(geh4_sweep, rel_width, color=color, lw=2, label=f"{T_C:.0f} C")
+
+    near_hcl = np.isclose(hcl_train, hcl_fixed, atol=0.08)
+    ax_pred.scatter(geh4_train[near_hcl], gr_train[near_hcl], color="black", marker="x",
+                    s=35, label="DS1 points near HCl/DCS=0.34", zorder=5)
+    for ax in (ax_pred, ax_uq):
+        ax.axvline(max_geh4, color="black", ls="--", lw=1.1)
+        ax.axvspan(max_geh4, geh4_sweep[-1], color="0.92", alpha=0.75, zorder=0)
+        ax.set_xscale("log")
+        _set_ratio_ticks(ax, x_ticks=[0.02, 0.03, 0.05, 0.10, 0.20])
+        ax.set_xlabel(r"$p_{\mathrm{GeH4}}/p_{\mathrm{DCS}}$")
+    ax_pred.set_yscale("log")
+    ax_pred.set_ylabel("GR (nm/min)")
+    ax_pred.set_title("Posterior process curves")
+    ax_pred.legend(fontsize=7.5, loc="upper left")
+    ax_pred.text(max_geh4 * 1.08, ax_pred.get_ylim()[0] * 1.35, "outside DS1\nGeH4 range", fontsize=8)
+
+    ax_uq.set_ylabel("90% band width / median")
+    ax_uq.set_title("Uncertainty grows when extrapolating")
+    ax_uq.legend(fontsize=8, loc="upper left")
+    fig.suptitle("Bayesian physics response envelope at fixed HCl/DCS=0.34", y=1.03)
+    fig.tight_layout()
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Wrote %s", out)
+    return metrics
+
+
+def plot_process_window_probability_map(p4: dict, out: Path) -> dict:
+    """Presentation plot: convert the posterior into a recipe-space decision
+    map at a fixed temperature.
+
+    The lower-right panel is deliberately phrased as probability of meeting a
+    process target rather than "model score". That is the practical advantage
+    over a deterministic Tomasini-style response function: the model gives a
+    process window and a confidence level at the same time."""
+    ds1 = load_all_datasets(Config()).filter(source_dataset="DS1")
+    fb1 = p4["features_ds1"]
+    gr_samples = _subset_samples(p4["mcmc_gr"], _GR_PARAM_NAMES)
+    ge_samples = _subset_samples(p4["mcmc_ge"], _GE_PARAM_NAMES)
+
+    hcl_train = np.array([r.p_HCl for r in ds1.rows])
+    geh4_train = np.array([r.p_GeH4 for r in ds1.rows])
+    T_C = 725.0
+
+    hcl_grid = np.geomspace(max(0.02, hcl_train.min() * 0.7), hcl_train.max() * 1.35, 58)
+    geh4_grid = np.geomspace(max(0.006, geh4_train.min() * 0.7), geh4_train.max() * 1.6, 64)
+    H, G = np.meshgrid(hcl_grid, geh4_grid, indexing="ij")
+    X = _make_feature_matrix(fb1.invT_scaler, T_C, H, G)
+
+    gr_draws = _gr_draws_from_samples(gr_samples, X)
+    ge_draws = _ge_draws_from_samples(ge_samples, X)
+    gr_lo, gr_med, gr_hi = _draw_summary(gr_draws)
+    _, ge_med, _ = _draw_summary(100.0 * ge_draws)
+    gr_rel_width = (gr_hi - gr_lo) / gr_med
+
+    target = (
+        (gr_draws >= 20.0)
+        & (gr_draws <= 50.0)
+        & (100.0 * ge_draws >= 18.0)
+        & (100.0 * ge_draws <= 22.0)
+    )
+    target_prob = target.mean(axis=0)
+
+    shape = H.shape
+    gr_med = gr_med.reshape(shape)
+    ge_med = ge_med.reshape(shape)
+    gr_rel_width = gr_rel_width.reshape(shape)
+    target_prob = target_prob.reshape(shape)
+
+    fig, axes = plt.subplots(2, 2, figsize=(11.4, 8.2), sharex=True, sharey=True)
+    panels = [
+        (axes[0, 0], gr_med, "Posterior median GR", "GR (nm/min)", "viridis"),
+        (axes[0, 1], gr_rel_width, "GR uncertainty", "90% width / median", "magma"),
+        (axes[1, 0], ge_med, "Posterior median Ge", "Ge (at.%)", "cividis"),
+        (axes[1, 1], target_prob, "Probability of target window", "Pr(20-50 nm/min and 18-22% Ge)", "YlGn"),
+    ]
+    for ax, Z, title, cbar_label, cmap in panels:
+        pcm = ax.pcolormesh(G, H, Z, shading="auto", cmap=cmap)
+        cb = fig.colorbar(pcm, ax=ax)
+        cb.set_label(cbar_label)
+        ax.scatter(geh4_train, hcl_train, c="white", edgecolors="black", s=22, linewidths=0.6)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        _set_ratio_ticks(ax, x_ticks=[0.02, 0.03, 0.05, 0.10], y_ticks=[0.10, 0.20, 0.50, 1.00])
+        ax.set_title(title)
+        ax.axvline(geh4_train.max(), color="white", ls="--", lw=1.0, alpha=0.9)
+        ax.axhline(hcl_train.max(), color="white", ls="--", lw=1.0, alpha=0.9)
+    axes[0, 0].contour(G, H, gr_med, levels=[10, 30, 100], colors="white", linewidths=0.9)
+    axes[1, 0].contour(G, H, ge_med, levels=[10, 20, 30], colors="white", linewidths=0.9)
+    axes[1, 1].contour(G, H, target_prob, levels=[0.25, 0.50, 0.75], colors="black", linewidths=1.0)
+
+    for ax in axes[1, :]:
+        ax.set_xlabel(r"$p_{\mathrm{GeH4}}/p_{\mathrm{DCS}}$")
+    for ax in axes[:, 0]:
+        ax.set_ylabel(r"$p_{\mathrm{HCl}}/p_{\mathrm{DCS}}$")
+    fig.suptitle("Posterior process-window map at T=725 C", y=1.01)
+    fig.tight_layout()
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Wrote %s", out)
+
+    best_idx = np.unravel_index(int(np.argmax(target_prob)), target_prob.shape)
+    return {
+        "T_C": T_C,
+        "target": "GR 20-50 nm/min and Ge 18-22 at.%",
+        "max_target_probability": float(target_prob[best_idx]),
+        "best_hcl_ratio": float(H[best_idx]),
+        "best_geh4_ratio": float(G[best_idx]),
+    }
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     FIG_DIR.mkdir(exist_ok=True)
@@ -209,6 +416,8 @@ def main() -> None:
     plot_credible_interval_for_query(p4, cfg, T_C=725.0, hcl_ratio=0.5, geh4_ratio=0.03,
                                      out=FIG_DIR / "inference_credible_interval_query.png")
     plot_extrapolation_superiority(p4, FIG_DIR / "inference_extrapolation_superiority.png")
+    plot_bayesian_response_envelope(p4, FIG_DIR / "inference_bayesian_response_envelope.png")
+    plot_process_window_probability_map(p4, FIG_DIR / "inference_process_window_map.png")
 
 
 if __name__ == "__main__":

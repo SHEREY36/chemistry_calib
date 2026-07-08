@@ -262,8 +262,8 @@ in (`tests/test_active_learning.py`), not real CFD output. Swapping in real
 ### "Show me the reproduction plots / uncertainty diagnostics"
 ```bash
 chem-ml plots              # Figs. 2-5 reproduction + posterior-predictive calibration -> figures/
-chem-ml inference-plots    # MCMC posterior pairplot/trace, single-query credible interval,
-                           # physics-vs-black-box extrapolation comparison -> figures/inference_*.png
+chem-ml inference-plots    # Posterior diagnostics plus presentation plots:
+                           # response envelope, extrapolation, process-window map -> figures/inference_*.png
 ```
 
 ---
