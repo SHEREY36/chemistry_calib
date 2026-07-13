@@ -1,6 +1,9 @@
-# Tomasini et al. (2010) Reproduction: Validation Report
+# Tomasini et al. (2010) Benchmark: Validation Report
 
 Generated 2026-07-08T11:13:07 on Python 3.11.15.
+
+This is a benchmark proving that the physics-kernel family can reproduce a
+known SiGe VPE dataset. It is not the production Applied-data calibration.
 
 Source: P. Tomasini, V. Machkaoutsan, S.G. Thomas, "Analysis of silicon germanium vapor phase epitaxy kinetics," *Thin Solid Films* 518 (2010) S12-S17.
 

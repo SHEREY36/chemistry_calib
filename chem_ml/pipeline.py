@@ -17,6 +17,7 @@ from chem_ml.calibration import (
     b_numpyro_model,
     c_numpyro_model,
     diagnostics,
+    dopant_numpyro_model,
     ge_numpyro_model,
     gr_numpyro_model,
     mu_draws,
@@ -35,7 +36,7 @@ from chem_ml.inverse_design import (
     posterior_predictive_variance,
     stack_theta_samples,
 )
-from chem_ml.physics_core import b_logmodel, c_logmodel, ge_logmodel, gr_logmodel
+from chem_ml.physics_core import b_logmodel, c_logmodel, dopant_logmodel, ge_logmodel, gr_logmodel
 from chem_ml.reactor_transfer import reactor_transfer_model_ge_only, reactor_transfer_model_gr_ge
 from chem_ml.registry import SpeciesRegistry
 from chem_ml.residual_nn import ResidualNN, build_residual_input
@@ -152,6 +153,7 @@ def run_phase4_calibration(cfg: Config, ds: Dataset | None = None) -> dict:
 
 
 _B_PARAM_NAMES = ["lnK_B", "beta_HCl", "beta_GeH4", "beta_B2H6"]
+_X_PARAM_NAMES = ["lnK_X", "beta_HCl_X", "beta_GeH4_X", "beta_dopant_X"]
 _C_PARAM_NAMES = ["lnK_C", "kappa_C", "cgamma_HCl", "cgamma_GeH4", "cgamma_MMS"]
 
 
@@ -216,6 +218,127 @@ def run_class_calibration(cfg: Config, ds: Dataset | None = None,
         "No class-specific observable slot is implemented for this chemistry yet; "
         "legacy SiGe/SiGe:B reproduction remains available through run_phase4_calibration."
     )
+    return result
+
+
+def run_core_chemistry_calibration(cfg: Config, ds: Dataset,
+                                   chem_class: ChemClass,
+                                   reference_reactor: str) -> dict:
+    """Production calibration route for the shared chemistry architecture.
+
+    Unlike ``run_phase4_calibration``, this is not hard-wired to Tomasini's
+    ASM Epsilon rows. It fits whatever observable slots are present for the
+    declared chemistry/reference reactor while preserving the same physics
+    kernels: GR, Ge ratio, carbon ratio, and dopant incorporation.
+    """
+    target = canonical_chem_class(chem_class)
+    selected = ds.filter_where(
+        lambda r: canonical_chem_class(r.chem_class) == target and r.reactor_id == reference_reactor
+    )
+    if len(selected) == 0:
+        raise ValueError(
+            f"No production rows found for chem_class={target.value}, "
+            f"reference_reactor={reference_reactor}. Register Applied data first, "
+            "or use the explicit Tomasini benchmark path."
+        )
+
+    result: dict = {"selected_dataset": selected}
+    report = {
+        "chem_class": target.value,
+        "reference_reactor": reference_reactor,
+        "n_rows": len(selected),
+        "training_source": "registered_production_data",
+        "observable_slots": {},
+    }
+
+    invT_scaler = None
+    gr_rows = selected.filter_where(lambda r: r.GR_nm_min is not None)
+    if len(gr_rows) > 0:
+        fb_gr = build_features(gr_rows)
+        invT_scaler = fb_gr.invT_scaler
+        y_gr = np.array([r.GR_nm_min for r in gr_rows.rows])
+        mcmc_gr = run_mcmc(gr_numpyro_model, fb_gr.X, jnp.asarray(np.log(y_gr)), cfg)
+        gr_mu = mu_draws(gr_logmodel, mcmc_gr, fb_gr.X, _GR_PARAM_NAMES)
+        report["observable_slots"]["GR"] = {
+            "trained": True,
+            "n_rows": len(gr_rows),
+            "R2": r2_score(y_gr, np.exp(np.asarray(gr_mu).mean(0))),
+            "diagnostics": diagnostics(mcmc_gr),
+        }
+        result.update({"mcmc_gr": mcmc_gr, "features_gr": fb_gr, "idata_gr": az.from_numpyro(mcmc_gr)})
+    else:
+        report["observable_slots"]["GR"] = {"trained": False, "reason": "No GR_nm_min values."}
+
+    ge_rows = selected.filter_where(lambda r: r.Ge_at_frac is not None)
+    if len(ge_rows) > 0:
+        fb_ge = build_features(ge_rows, invT_scaler=invT_scaler)
+        invT_scaler = invT_scaler or fb_ge.invT_scaler
+        y_ge = np.array([r.Ge_at_frac for r in ge_rows.rows])
+        y_ge_log = jnp.asarray(np.log(y_ge / (1.0 - y_ge)))
+        mcmc_ge = run_mcmc(ge_numpyro_model, fb_ge.X, y_ge_log, cfg)
+        ge_mu = mu_draws(ge_logmodel, mcmc_ge, fb_ge.X, _GE_PARAM_NAMES)
+        report["observable_slots"]["Ge"] = {
+            "trained": True,
+            "n_rows": len(ge_rows),
+            "R2": r2_score(y_ge / (1 - y_ge), np.exp(np.asarray(ge_mu).mean(0))),
+            "diagnostics": diagnostics(mcmc_ge),
+        }
+        result.update({"mcmc_ge": mcmc_ge, "features_ge": fb_ge, "idata_ge": az.from_numpyro(mcmc_ge)})
+    else:
+        report["observable_slots"]["Ge"] = {"trained": False, "reason": "No Ge_at_pct values."}
+
+    c_rows = selected.filter_where(lambda r: r.C_at_frac is not None)
+    if len(c_rows) > 0:
+        fb_c = build_features(c_rows, invT_scaler=invT_scaler)
+        invT_scaler = invT_scaler or fb_c.invT_scaler
+        y_c = np.array([r.C_at_frac for r in c_rows.rows])
+        y_c_log = jnp.asarray(np.log(y_c / (1.0 - y_c)))
+        mcmc_c = run_mcmc(c_numpyro_model, fb_c.X, y_c_log, cfg)
+        c_mu = mu_draws(c_logmodel, mcmc_c, fb_c.X, _C_PARAM_NAMES)
+        report["observable_slots"]["C"] = {
+            "trained": True,
+            "n_rows": len(c_rows),
+            "R2": r2_score(y_c / (1 - y_c), np.exp(np.asarray(c_mu).mean(0))),
+            "diagnostics": diagnostics(mcmc_c),
+        }
+        result.update({"mcmc_c": mcmc_c, "features_c": fb_c, "idata_c": az.from_numpyro(mcmc_c)})
+    else:
+        report["observable_slots"]["C"] = {"trained": False, "reason": "No C_at_pct values."}
+
+    dop_rows = selected.filter_where(lambda r: r.B_conc is not None or r.dopant_conc is not None)
+    if len(dop_rows) > 0:
+        fb_d = build_features(dop_rows, invT_scaler=invT_scaler)
+        invT_scaler = invT_scaler or fb_d.invT_scaler
+        y_d = np.array([(r.B_conc if r.B_conc is not None else r.dopant_conc) / DS2_SI_ATOMS_CM3
+                        for r in dop_rows.rows])
+        is_boron_only = all((r.dopant_species.upper() in ("", "B2H6", "DIBORANE")) for r in dop_rows.rows)
+        if is_boron_only:
+            mcmc_d = run_mcmc(b_numpyro_model, fb_d.X, jnp.asarray(np.log(y_d)), cfg)
+            d_mu = mu_draws(b_logmodel, mcmc_d, fb_d.X, _B_PARAM_NAMES)
+            param_names = _B_PARAM_NAMES
+            model_key = "mcmc_b"
+            note = "Boron/B2H6 dopant slot trained."
+        else:
+            mcmc_d = run_mcmc(dopant_numpyro_model, fb_d.X, jnp.asarray(np.log(y_d)), cfg)
+            d_mu = mu_draws(dopant_logmodel, mcmc_d, fb_d.X, _X_PARAM_NAMES)
+            param_names = _X_PARAM_NAMES
+            model_key = "mcmc_x"
+            note = "Generic dopant slot trained from dopant_over_Si/p_dopant; validate per dopant species."
+        report["observable_slots"]["dopant"] = {
+            "trained": True,
+            "n_rows": len(dop_rows),
+            "R2": r2_score(y_d, np.exp(np.asarray(d_mu).mean(0))),
+            "diagnostics": diagnostics(mcmc_d),
+            "parameter_names": param_names,
+            "note": note,
+        }
+        result.update({model_key: mcmc_d, "features_dopant": fb_d, "idata_dopant": az.from_numpyro(mcmc_d)})
+    else:
+        report["observable_slots"]["dopant"] = {"trained": False, "reason": "No dopant concentration values."}
+
+    report["PASS"] = any(slot.get("trained") for slot in report["observable_slots"].values())
+    result["report"] = report
+    result["invT_scaler"] = invT_scaler
     return result
 
 

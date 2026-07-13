@@ -105,44 +105,51 @@ def test_register_experiment_cfd_profile_parses_output_contract(tmp_path):
     assert out["_cfd_result"].condition.condition_id == "cfd_1"
 
 
-def test_train_chemistry_pooled_dispatches_to_accumulated_dataset(monkeypatch, tmp_path):
+def test_train_chemistry_pooled_dispatches_to_production_dataset(monkeypatch, tmp_path):
     calls = {}
 
-    def fake_load_accumulated_dataset(cfg):
+    def fake_load_production_dataset(cfg):
         calls["loaded"] = True
-        return "accumulated"
+        return "production"
 
-    def fake_run_phase4_calibration(cfg, ds=None):
+    def fake_run_core_chemistry_calibration(cfg, ds=None, chem_class=None, reference_reactor=None):
         calls["ds"] = ds
+        calls["chem_class"] = chem_class
+        calls["reference_reactor"] = reference_reactor
         return {"report": {"PASS": True}}
 
-    monkeypatch.setattr(workflows, "load_accumulated_dataset", fake_load_accumulated_dataset)
-    monkeypatch.setattr(workflows, "run_phase4_calibration", fake_run_phase4_calibration)
+    monkeypatch.setattr(workflows, "load_production_dataset", fake_load_production_dataset)
+    monkeypatch.setattr(workflows, "run_core_chemistry_calibration", fake_run_core_chemistry_calibration)
 
     out = workflows.train(
         _cfg(tmp_path),
         TrainRequest(target=TrainTarget.CHEMISTRY, strategy=TrainStrategy.POOLED),
     )
 
-    assert calls == {"loaded": True, "ds": "accumulated"}
+    assert calls == {
+        "loaded": True,
+        "ds": "production",
+        "chem_class": ChemClass.SIGE,
+        "reference_reactor": "ASM_Epsilon",
+    }
     assert out["report"]["PASS"] is True
 
 
-def test_train_sigec_pooled_dispatches_to_class_calibration(monkeypatch, tmp_path):
+def test_train_sigec_pooled_dispatches_to_core_production_calibration(monkeypatch, tmp_path):
     calls = {}
 
-    def fake_load_accumulated_dataset(cfg):
+    def fake_load_production_dataset(cfg):
         calls["loaded"] = True
-        return "accumulated"
+        return "production"
 
-    def fake_run_class_calibration(cfg, ds=None, chem_class=None, reference_reactor=None):
+    def fake_run_core_chemistry_calibration(cfg, ds=None, chem_class=None, reference_reactor=None):
         calls["class_ds"] = ds
         calls["chem_class"] = chem_class
         calls["reference_reactor"] = reference_reactor
         return {"report": {"carbon_model_trained": False, "carbon_skip_reason": "No rows with C_at_pct/C_at_frac were available."}}
 
-    monkeypatch.setattr(workflows, "load_accumulated_dataset", fake_load_accumulated_dataset)
-    monkeypatch.setattr(workflows, "run_class_calibration", fake_run_class_calibration)
+    monkeypatch.setattr(workflows, "load_production_dataset", fake_load_production_dataset)
+    monkeypatch.setattr(workflows, "run_core_chemistry_calibration", fake_run_core_chemistry_calibration)
 
     out = workflows.train(
         _cfg(tmp_path),
@@ -156,7 +163,7 @@ def test_train_sigec_pooled_dispatches_to_class_calibration(monkeypatch, tmp_pat
 
     assert calls == {
         "loaded": True,
-        "class_ds": "accumulated",
+        "class_ds": "production",
         "chem_class": ChemClass.SIGEC,
         "reference_reactor": "XYZ_tool_1",
     }

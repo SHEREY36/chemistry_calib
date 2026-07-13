@@ -1,19 +1,10 @@
-"""
-Command-line entry points for the whole pipeline (Phase 11 commissioning).
-See README.md for the full command reference an HVM process engineer
-would actually use day to day.
+"""Command-line entry points for production chemistry calibration.
 
-Design note: every command that needs a fitted posterior (predict,
-inverse, sensitivity, export-mechanism, add-reactor) just RE-RUNS Phase 4
-calibration fresh rather than loading a cached model file. This is a
-deliberate simplicity choice, not an oversight: NUTS on this dataset size
-(order ~100 rows, 3 small models) takes single-digit seconds, so there is
-no serialized "model.pt"-style artifact to keep in sync -- the source of
-truth is always data/raw + data/processed/additions_manifest.json, and
-`calibrate` writes the resulting posteriors to data/processed/posteriors/
-*.nc (arviz NetCDF) purely as a record, not as something other commands
-read back from. If the accumulated dataset grows to the point this
-becomes slow, that's the point to add caching -- not before.
+The primary workflow is:
+  data add -> train --save-model-package -> export-udf -> CFD-ACE+.
+
+Tomasini-oriented commands remain as explicit benchmarks/demos and are not
+the production Applied-data training path.
 """
 from __future__ import annotations
 
@@ -72,6 +63,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
             strategy=TrainStrategy.POOLED,
             include_registered=args.pooled,
             save_posteriors=args.save_posteriors,
+            use_benchmark_data=True,
         ),
     )
     _print_json(result["report"])
@@ -221,6 +213,13 @@ def cmd_train(args: argparse.Namespace) -> None:
             widen_factor=args.widen_factor,
             include_registered=not args.base_only,
             save_posteriors=args.save_posteriors,
+            use_benchmark_data=args.benchmark_tomasini,
+            species_names=tuple(args.species or ()),
+            target_deposit=args.target_deposit or "",
+            save_model_package=args.save_model_package,
+            model_package_path=args.model_package_path,
+            fit_residual_nn=not args.no_residual_nn,
+            residual_steps=args.residual_steps,
         ),
     )
     public = _public(result)
@@ -324,6 +323,50 @@ def cmd_export_mechanism(args: argparse.Namespace) -> None:
     print(f"UDF written to {out['udf_path']}, mechanism to {out['mechanism_path']}")
 
 
+def cmd_export_udf(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from chem_ml.cfd.mechanism import export_calibrated_model_to_cfd
+    from chem_ml.model_package import CalibratedChemistryModel
+
+    payload = json.loads(Path(args.model_json).read_text())
+    model = CalibratedChemistryModel.from_jsonable(payload)
+    out = export_calibrated_model_to_cfd(model, args.out_dir)
+    _print_json(out["manifest"])
+    print(f"UDF written to {out['udf_path']}; manifest written to {out['manifest_path']}")
+
+
+def _parse_flow_assignments(assignments: list[str]) -> dict[str, float]:
+    flows = {}
+    for item in assignments:
+        if "=" not in item:
+            raise ValueError(f"Flow must be SPECIES=SCCM, got {item!r}")
+        species, value = item.split("=", 1)
+        flows[species] = float(value)
+    return flows
+
+
+def cmd_cfd_ingest(args: argparse.Namespace) -> None:
+    from chem_ml.cfd.io import CFDCondition, parse_cfd_output
+    from chem_ml.cfd.transfer import extract_transfer_priors
+
+    cond = CFDCondition(
+        T_set_K=args.t_set_k,
+        flows_sccm=_parse_flow_assignments(args.flow),
+        P_tot_torr=args.p_tot_torr,
+        geometry_id=args.geometry_id,
+        condition_id=args.condition_id or "",
+    )
+    result = parse_cfd_output(args.csv, cond)
+    priors = extract_transfer_priors([result])
+    _print_json({
+        "status": "parsed",
+        "condition_id": cond.condition_id,
+        "n_radial_points": int(len(result.r_mm)),
+        "transfer_priors": priors,
+    })
+
+
 def cmd_active_learn(args: argparse.Namespace) -> None:
     import numpy as np
     from pathlib import Path
@@ -375,7 +418,10 @@ def cmd_inference_plots(args: argparse.Namespace) -> None:
 
 # ---------------------------------------------------------------------------
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="chem-ml")
+    parser = argparse.ArgumentParser(
+        prog="chem-ml",
+        description="Train Applied epitaxy chemistry models and export deterministic CFD-ACE+ surface UDFs.",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_data = sub.add_parser("data", help="Intent-based data intake")
@@ -404,7 +450,19 @@ def main() -> None:
     p.add_argument("--mode", default="blanket", choices=["blanket", "selective"])
     p.add_argument("--widen-factor", type=float, default=2.0)
     p.add_argument("--base-only", action="store_true", help="For chemistry/pooled, ignore registered additions")
+    p.add_argument("--benchmark-tomasini", action="store_true",
+                   help="Use Tomasini benchmark data. Production training defaults to registered Applied data only.")
     p.add_argument("--save-posteriors", action="store_true", help="Write data/processed/posteriors/*.nc")
+    p.add_argument("--species", nargs="+",
+                   help="Active precursor species, e.g. dichlorosilane germane hcl hydrogen")
+    p.add_argument("--target-deposit", help="Human-readable target label, e.g. SiGe or SiGeC:B")
+    p.add_argument("--save-model-package", action="store_true",
+                   help="Write a JSON package consumable by export-udf")
+    p.add_argument("--model-package-path", default="data/processed/model_package.json")
+    p.add_argument("--no-residual-nn", action="store_true",
+                   help="Disable bounded residual-NN fitting in the saved model package")
+    p.add_argument("--residual-steps", type=int, default=2000,
+                   help="Optimizer steps for bounded residual-NN package fit")
     p.set_defaults(func=cmd_train)
 
     p = sub.add_parser("validate", help="Intent-based validation suites")
@@ -414,7 +472,7 @@ def main() -> None:
     p.add_argument("--report-path", default="VALIDATION_REPORT.md")
     p.set_defaults(func=cmd_validate)
 
-    p = sub.add_parser("calibrate", help="Run Phase 1-4 ingest + Bayesian calibration")
+    p = sub.add_parser("calibrate", help="Run the Tomasini benchmark calibration")
     p.add_argument("--pooled", action="store_true", help="Include registered additions (data_store), not just Tomasini")
     p.add_argument("--save-posteriors", action="store_true", help="Write data/processed/posteriors/*.nc")
     p.set_defaults(func=cmd_calibrate)
@@ -436,12 +494,12 @@ def main() -> None:
     p.add_argument("--widen-factor", type=float, default=2.0)
     p.set_defaults(func=cmd_warm_start)
 
-    p = sub.add_parser("add-reactor", help="Phase 7: fit delta_r for a brand-new reactor (chemistry frozen)")
+    p = sub.add_parser("add-reactor", help="Fit a reactor-transfer adapter with chemistry frozen")
     p.add_argument("--csv", required=True)
     p.add_argument("--reactor", required=True)
     p.set_defaults(func=cmd_add_reactor)
 
-    p = sub.add_parser("add-wafer-scan", help="Phase 12: register a spatial wafer scan (contour/radial GR/Ge scan)")
+    p = sub.add_parser("add-wafer-scan", help="Register a spatial wafer scan (contour/radial GR/Ge scan)")
     p.add_argument("--runs-csv", required=True, help="One row per wafer run: run_id, T_set_C, ratios, Stick_i/probe_i cols")
     p.add_argument("--points-csv", required=True, help="One row per measured point: run_id, x_mm, y_mm, GR/Ge/thickness")
     p.add_argument("--reactor", required=True)
@@ -449,7 +507,7 @@ def main() -> None:
     p.add_argument("--tag", required=True, help="Unique source tag -- re-using one is a hard error")
     p.set_defaults(func=cmd_add_wafer_scan)
 
-    p = sub.add_parser("spatial-fit", help="Phase 12: fit a radially-resolved reactor-transfer offset against a registered wafer scan")
+    p = sub.add_parser("spatial-fit", help="Fit a radially-resolved transfer adapter against a registered wafer scan")
     p.add_argument("--tag", required=True, help="source_tag a wafer scan was registered under via add-wafer-scan")
     p.set_defaults(func=cmd_spatial_fit)
 
@@ -474,20 +532,35 @@ def main() -> None:
     p.add_argument("--b2h6-ratio", type=float, default=None, help="p_B2H6 / p_DCS (optional)")
     p.set_defaults(func=cmd_predict)
 
-    p = sub.add_parser("inverse", help="Phase 8: find a recipe achieving a target GR/Ge, with confidence gating")
+    p = sub.add_parser("inverse", help="Benchmark/demo inverse design for target GR/Ge")
     p.add_argument("--target-gr", type=float, required=True, help="nm/min")
     p.add_argument("--target-ge", type=float, required=True, help="fraction, e.g. 0.20 for 20%%")
     p.set_defaults(func=cmd_inverse)
 
-    p = sub.add_parser("sensitivity", help="Phase 6: identifiability + sensitivity derivatives")
+    p = sub.add_parser("sensitivity", help="Benchmark identifiability + sensitivity derivatives")
     p.set_defaults(func=cmd_sensitivity)
 
-    p = sub.add_parser("export-mechanism", help="Phase 9: export calibrated model as CFD-ACE+ UDF + mechanism deck")
+    p = sub.add_parser("export-mechanism", help="Benchmark DCS/silane mechanism export; production uses export-udf")
     p.add_argument("--system", default="dcs", choices=["dcs", "silane"])
     p.add_argument("--out-dir", default="cfd_export")
     p.set_defaults(func=cmd_export_mechanism)
 
-    p = sub.add_parser("active-learn", help="Phase 10: GP-guided CFD condition selection")
+    p = sub.add_parser("export-udf", help="Export a production chemistry package JSON as surface_udf.c")
+    p.add_argument("--model-json", required=True, help="CalibratedChemistryModel JSON package")
+    p.add_argument("--out-dir", default="cfd_export")
+    p.set_defaults(func=cmd_export_udf)
+
+    p = sub.add_parser("cfd-ingest", help="Parse a CFD-ACE+ wall-profile CSV and report transport priors")
+    p.add_argument("--csv", required=True, help="CFD wall-profile CSV matching chem_ml.cfd.io output contract")
+    p.add_argument("--t-set-k", type=float, required=True)
+    p.add_argument("--p-tot-torr", type=float, required=True)
+    p.add_argument("--geometry-id", required=True)
+    p.add_argument("--condition-id", default="")
+    p.add_argument("--flow", action="append", required=True,
+                   help="Inlet flow assignment SPECIES=SCCM; repeat, e.g. --flow DCS=50 --flow HCl=25 --flow GeH4=2")
+    p.set_defaults(func=cmd_cfd_ingest)
+
+    p = sub.add_parser("active-learn", help="GP-guided CFD condition selection")
     p.add_argument("--mode", default="seed", choices=["seed", "batch"])
     p.add_argument("--n", type=int, default=8)
     p.add_argument("--bounds", type=float, nargs=8, required=True,
@@ -499,7 +572,7 @@ def main() -> None:
     p = sub.add_parser("report", help="Regenerate VALIDATION_REPORT.md + figures/ end to end")
     p.set_defaults(func=cmd_report)
 
-    p = sub.add_parser("plots", help="Regenerate the Fig 2-5 reproduction + calibration plots only")
+    p = sub.add_parser("plots", help="Regenerate benchmark reproduction + calibration plots only")
     p.set_defaults(func=cmd_plots)
 
     p = sub.add_parser("inference-plots", help="Generate posterior/credible-interval/extrapolation-comparison plots")

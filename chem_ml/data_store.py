@@ -125,6 +125,24 @@ def load_accumulated_dataset(cfg: Config) -> Dataset:
     return ds
 
 
+def load_production_dataset(cfg: Config) -> Dataset:
+    """Load only registered experimental data for production calibration.
+
+    Tomasini remains available through ``ingest_tomasini`` and the benchmark
+    validation path, but it is deliberately excluded here so production
+    chemistry packages are trained from Applied/epitaxy-team data only.
+    """
+    ds = Dataset([])
+    for entry in _load_manifest(cfg):
+        add_ds = ingest_standard_csv(
+            entry["csv_path"], reactor_id=entry["reactor_id"],
+            chem_class=ChemClass(entry["chem_class"]), mode=Mode(entry["mode"]),
+            source_tag=entry["source_tag"],
+        )
+        ds = ds + add_ds
+    return ds
+
+
 # ---------------------------------------------------------------------------
 # Phase 12: spatial wafer-scan registration. A DELIBERATELY SEPARATE manifest
 # (spatial_manifest.json, not additions_manifest.json) with the SAME

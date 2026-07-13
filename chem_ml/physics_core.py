@@ -64,6 +64,15 @@ def b_logmodel(params: dict, X: jnp.ndarray) -> jnp.ndarray:
             + params["beta_B2H6"] * ln_B2H6)
 
 
+def dopant_logmodel(params: dict, X: jnp.ndarray) -> jnp.ndarray:
+    """ln([X]/[Si]) for a generic dopant precursor such as PH3 or B2H6."""
+    ln_HCl, ln_GeH4, ln_dopant = X[:, 1], X[:, 2], X[:, 5]
+    return (params["lnK_X"]
+            + params["beta_HCl_X"] * ln_HCl
+            + params["beta_GeH4_X"] * ln_GeH4
+            + params["beta_dopant_X"] * ln_dopant)
+
+
 def c_logmodel(params: dict, X: jnp.ndarray) -> jnp.ndarray:
     """ln(x_C/(1-x_C)) for SiGeC carbon incorporation.
 

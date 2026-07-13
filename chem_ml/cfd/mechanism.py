@@ -46,6 +46,7 @@ from pathlib import Path
 import numpy as np
 
 from chem_ml.config import R_GAS
+from chem_ml.model_package import BoundedResidualMLP, CalibratedChemistryModel, Observable, RESIDUAL_INPUT_NAMES
 from chem_ml.physics_core import destandardize_kappa
 
 log = logging.getLogger("chem_ml")
@@ -179,8 +180,79 @@ def _calibrate_rate_limiting_step(steps: list[MechanismStep], kappa_GR_std: floa
     return out
 
 
+_RESIDUAL_FEATURES = [
+    "invT_std", "ln_HCl", "ln_GeH4", "ln_B2H6", "ln_C_source", "ln_dopant",
+    "ln_H2", "ln_N2", "XT_H2_minus_N2_scaled", "pattern_density",
+    "raw_HCl", "raw_GeH4", "raw_B2H6", "raw_C_source", "raw_dopant", "raw_H2", "raw_N2",
+]
+
+assert _RESIDUAL_FEATURES[:len(RESIDUAL_INPUT_NAMES)] == list(RESIDUAL_INPUT_NAMES)
+
+
+def _c_array(values: np.ndarray) -> str:
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim == 1:
+        return "{" + ", ".join(f"{v:.17g}" for v in arr) + "}"
+    return "{" + ", ".join(_c_array(row) for row in arr) + "}"
+
+
+def _residual_function_c(name: str, residual: BoundedResidualMLP) -> str:
+    indices = [_RESIDUAL_FEATURES.index(n) for n in residual.input_names]
+    lines = [
+        f"static double {name}(const double all_x[{len(_RESIDUAL_FEATURES)}]) {{",
+        f"    double h0[{len(indices)}];",
+    ]
+    for j, idx in enumerate(indices):
+        lines.append(f"    h0[{j}] = all_x[{idx}];")
+
+    prev_name = "h0"
+    prev_size = len(indices)
+    for layer_idx, (w, b) in enumerate(zip(residual.weights, residual.biases)):
+        out_size = b.shape[0]
+        w_name = f"{name}_W{layer_idx}"
+        b_name = f"{name}_b{layer_idx}"
+        h_name = f"h{layer_idx + 1}"
+        lines.append(f"    static const double {w_name}[{out_size}][{prev_size}] = {_c_array(w)};")
+        lines.append(f"    static const double {b_name}[{out_size}] = {_c_array(b)};")
+        lines.append(f"    double {h_name}[{out_size}];")
+        lines.append(f"    for (int i = 0; i < {out_size}; ++i) {{")
+        lines.append(f"        double v = {b_name}[i];")
+        lines.append(f"        for (int j = 0; j < {prev_size}; ++j) v += {w_name}[i][j] * {prev_name}[j];")
+        if layer_idx < len(residual.weights) - 1:
+            lines.append(f"        {h_name}[i] = tanh(v);")
+        else:
+            lines.append(f"        {h_name}[i] = v;")
+        lines.append("    }")
+        prev_name = h_name
+        prev_size = out_size
+
+    cap = residual.max_abs_log_correction
+    lines.append(f"    return {cap:.17g} * tanh({prev_name}[0] / {cap:.17g});")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _residual_block_c(residuals: dict[Observable, BoundedResidualMLP] | None) -> tuple[str, dict[Observable, str]]:
+    residuals = residuals or {}
+    names: dict[Observable, str] = {}
+    blocks = []
+    for obs, residual in residuals.items():
+        fn = f"residual_{obs.value}_log"
+        names[obs] = fn
+        blocks.append(_residual_function_c(fn, residual))
+    return "\n\n".join(blocks), names
+
+
+def _residual_call(names: dict[Observable, str], obs: Observable) -> str:
+    fn = names.get(obs)
+    return f" + {fn}(all_x)" if fn else ""
+
+
 def _udf_c_source(theta_gr: dict, theta_ge: dict, theta_b: dict | None,
-                  invT_scaler: tuple[float, float]) -> str:
+                  invT_scaler: tuple[float, float],
+                  theta_c: dict | None = None,
+                  theta_dopant: dict | None = None,
+                  residuals: dict[Observable, BoundedResidualMLP] | None = None) -> str:
     """Generate a C source file implementing the EXACT calibrated power law
     as a CFD-ACE+ user surface-flux subroutine. The function signature below
     is illustrative -- CFD-ACE+'s actual UDF calling convention (argument
@@ -196,6 +268,7 @@ def _udf_c_source(theta_gr: dict, theta_ge: dict, theta_b: dict | None,
     doing this in CFD rather than table-lookup: the surface BC responds to
     whatever local depletion/mixing the 3D flow actually produces."""
     mu, sd = invT_scaler
+    residual_src, residual_names = _residual_block_c(residuals)
     b_block = ""
     if theta_b is not None:
         b_block = f"""
@@ -215,9 +288,64 @@ double calibrated_B_over_Si(double p_HCl_over_pDCS, double p_GeH4_over_pDCS,
     return exp(ln_b_over_si);
 }}
 """
+    c_block = ""
+    if theta_c is not None:
+        c_block = f"""
+/* Carbon atomic fraction power law. Returns x_C in [0,1]. */
+double calibrated_xC_full(double T_wall_K, double p_HCl_over_pSi, double p_GeH4_over_pSi,
+                          double p_MMS_over_pSi, double p_dopant_over_pSi,
+                          double p_B2H6_over_pSi, double p_H2_over_pSi,
+                          double p_N2_over_pSi, double XT_flow_H2_minus_N2_sccm,
+                          double pattern_density) {{
+    double invT_std = (1.0 / T_wall_K - INV_T_MU) / INV_T_SD;
+    double all_x[{len(_RESIDUAL_FEATURES)}];
+    fill_residual_features(all_x, invT_std, p_HCl_over_pSi, p_GeH4_over_pSi,
+                           p_B2H6_over_pSi, p_MMS_over_pSi, p_dopant_over_pSi,
+                           p_H2_over_pSi, p_N2_over_pSi,
+                           XT_flow_H2_minus_N2_sccm, pattern_density);
+    const double lnK_C       = {theta_c['lnK_C']:.10g};
+    const double kappa_C     = {theta_c['kappa_C']:.10g};
+    const double cgamma_HCl  = {theta_c['cgamma_HCl']:.10g};
+    const double cgamma_GeH4 = {theta_c['cgamma_GeH4']:.10g};
+    const double cgamma_MMS  = {theta_c['cgamma_MMS']:.10g};
+    double ln_ratio = lnK_C + kappa_C * invT_std
+        + cgamma_HCl * log(p_HCl_over_pSi)
+        + cgamma_GeH4 * log(p_GeH4_over_pSi)
+        + cgamma_MMS * log(p_MMS_over_pSi){_residual_call(residual_names, Observable.C)};
+    double ratio = exp(ln_ratio);
+    return ratio / (1.0 + ratio);
+}}
+"""
+    dopant_block = ""
+    if theta_dopant is not None:
+        dopant_block = f"""
+/* Generic dopant/Si power law. Returns dopant/Si. */
+double calibrated_dopant_over_Si_full(double T_wall_K, double p_HCl_over_pSi, double p_GeH4_over_pSi,
+                                      double p_MMS_over_pSi, double p_dopant_over_pSi,
+                                      double p_B2H6_over_pSi, double p_H2_over_pSi,
+                                      double p_N2_over_pSi, double XT_flow_H2_minus_N2_sccm,
+                                      double pattern_density) {{
+    double invT_std = (1.0 / T_wall_K - INV_T_MU) / INV_T_SD;
+    double all_x[{len(_RESIDUAL_FEATURES)}];
+    fill_residual_features(all_x, invT_std, p_HCl_over_pSi, p_GeH4_over_pSi,
+                           p_B2H6_over_pSi, p_MMS_over_pSi, p_dopant_over_pSi,
+                           p_H2_over_pSi, p_N2_over_pSi,
+                           XT_flow_H2_minus_N2_sccm, pattern_density);
+    const double lnK_X          = {theta_dopant['lnK_X']:.10g};
+    const double beta_HCl_X     = {theta_dopant['beta_HCl_X']:.10g};
+    const double beta_GeH4_X    = {theta_dopant['beta_GeH4_X']:.10g};
+    const double beta_dopant_X  = {theta_dopant['beta_dopant_X']:.10g};
+    double ln_x_over_si = lnK_X
+        + beta_HCl_X * log(p_HCl_over_pSi)
+        + beta_GeH4_X * log(p_GeH4_over_pSi)
+        + beta_dopant_X * log(p_dopant_over_pSi){_residual_call(residual_names, Observable.DOPANT)};
+    return exp(ln_x_over_si);
+}}
+"""
     return f"""/* AUTO-GENERATED by chem_ml/cfd/mechanism.py -- do not hand-edit.
- * Source: Phase 4 posterior-mean parameters (Tomasini reproduction).
- * Regenerate with: python -m chem_ml.cli export-mechanism --form udf
+ * Source: calibrated chemistry package. Tomasini-derived exports are
+ * benchmarks only; production exports should be trained on Applied data.
+ * Regenerate with: python -m chem_ml.cli export-udf
  *
  * ADAPT: the exact function signature/registration CFD-ACE+ expects for a
  * user surface-reaction subroutine (see your license's User Subroutines
@@ -237,42 +365,111 @@ double calibrated_B_over_Si(double p_HCl_over_pDCS, double p_GeH4_over_pDCS,
 static const double INV_T_MU = {mu:.10g};
 static const double INV_T_SD = {sd:.10g};
 
+static double safe_log_ratio(double x) {{
+    return log(x > 1e-300 ? x : 1e-300);
+}}
+
+static void fill_residual_features(double all_x[{len(_RESIDUAL_FEATURES)}],
+                                   double invT_std,
+                                   double p_HCl_over_pSi,
+                                   double p_GeH4_over_pSi,
+                                   double p_B2H6_over_pSi,
+                                   double p_MMS_over_pSi,
+                                   double p_dopant_over_pSi,
+                                   double p_H2_over_pSi,
+                                   double p_N2_over_pSi,
+                                   double XT_flow_H2_minus_N2_sccm,
+                                   double pattern_density) {{
+    all_x[0] = invT_std;
+    all_x[1] = safe_log_ratio(p_HCl_over_pSi);
+    all_x[2] = safe_log_ratio(p_GeH4_over_pSi);
+    all_x[3] = safe_log_ratio(p_B2H6_over_pSi);
+    all_x[4] = safe_log_ratio(p_MMS_over_pSi);
+    all_x[5] = safe_log_ratio(p_dopant_over_pSi);
+    all_x[6] = safe_log_ratio(p_H2_over_pSi);
+    all_x[7] = safe_log_ratio(p_N2_over_pSi);
+    all_x[8] = XT_flow_H2_minus_N2_sccm / 1000.0;
+    all_x[9] = pattern_density;
+    all_x[10] = p_HCl_over_pSi;
+    all_x[11] = p_GeH4_over_pSi;
+    all_x[12] = p_B2H6_over_pSi;
+    all_x[13] = p_MMS_over_pSi;
+    all_x[14] = p_dopant_over_pSi;
+    all_x[15] = p_H2_over_pSi;
+    all_x[16] = p_N2_over_pSi;
+}}
+
+{residual_src}
+
 /* Growth rate power law (Phase 4, DS1 fit). Returns GR in nm/min. */
-double calibrated_GR_nm_min(double T_wall_K, double p_HCl_over_pDCS, double p_GeH4_over_pDCS) {{
+double calibrated_GR_nm_min_full(double T_wall_K, double p_HCl_over_pSi, double p_GeH4_over_pSi,
+                                 double p_MMS_over_pSi, double p_dopant_over_pSi,
+                                 double p_B2H6_over_pSi, double p_H2_over_pSi,
+                                 double p_N2_over_pSi, double XT_flow_H2_minus_N2_sccm,
+                                 double pattern_density) {{
     const double lnK_GR     = {theta_gr['lnK_GR']:.10g};
     const double kappa_GR   = {theta_gr['kappa_GR']:.10g};   /* coefficient of STANDARDIZED 1/T */
     const double gamma_HCl  = {theta_gr['gamma_HCl']:.10g};
     const double gamma_GeH4 = {theta_gr['gamma_GeH4']:.10g};
 
     double invT_std = (1.0 / T_wall_K - INV_T_MU) / INV_T_SD;
+    double all_x[{len(_RESIDUAL_FEATURES)}];
+    fill_residual_features(all_x, invT_std, p_HCl_over_pSi, p_GeH4_over_pSi,
+                           p_B2H6_over_pSi, p_MMS_over_pSi, p_dopant_over_pSi,
+                           p_H2_over_pSi, p_N2_over_pSi,
+                           XT_flow_H2_minus_N2_sccm, pattern_density);
     double ln_GR = lnK_GR
         + kappa_GR   * invT_std
-        + gamma_HCl  * log(p_HCl_over_pDCS)
-        + gamma_GeH4 * log(p_GeH4_over_pDCS);
+        + gamma_HCl  * log(p_HCl_over_pSi)
+        + gamma_GeH4 * log(p_GeH4_over_pSi){_residual_call(residual_names, Observable.GR)};
     return exp(ln_GR);
 }}
 
+double calibrated_GR_nm_min(double T_wall_K, double p_HCl_over_pDCS, double p_GeH4_over_pDCS) {{
+    return calibrated_GR_nm_min_full(T_wall_K, p_HCl_over_pDCS, p_GeH4_over_pDCS,
+                                     1e-300, 1e-300, 1e-300, 1e-300, 1e-300, 0.0, 0.0);
+}}
+
 /* Ge atomic fraction power law (Phase 4, DS1 fit). Returns x_Ge in [0,1]. */
-double calibrated_xGe(double T_wall_K, double p_HCl_over_pDCS, double p_GeH4_over_pDCS) {{
+double calibrated_xGe_full(double T_wall_K, double p_HCl_over_pSi, double p_GeH4_over_pSi,
+                           double p_MMS_over_pSi, double p_dopant_over_pSi,
+                           double p_B2H6_over_pSi, double p_H2_over_pSi,
+                           double p_N2_over_pSi, double XT_flow_H2_minus_N2_sccm,
+                           double pattern_density) {{
     const double lnK_Ge      = {theta_ge['lnK_Ge']:.10g};
     const double kappa_Ge    = {theta_ge['kappa_Ge']:.10g};
     const double dgamma_HCl  = {theta_ge['dgamma_HCl']:.10g};
     const double dgamma_GeH4 = {theta_ge['dgamma_GeH4']:.10g};
 
     double invT_std = (1.0 / T_wall_K - INV_T_MU) / INV_T_SD;
+    double all_x[{len(_RESIDUAL_FEATURES)}];
+    fill_residual_features(all_x, invT_std, p_HCl_over_pSi, p_GeH4_over_pSi,
+                           p_B2H6_over_pSi, p_MMS_over_pSi, p_dopant_over_pSi,
+                           p_H2_over_pSi, p_N2_over_pSi,
+                           XT_flow_H2_minus_N2_sccm, pattern_density);
     double ln_ratio = lnK_Ge
         + kappa_Ge    * invT_std
-        + dgamma_HCl  * log(p_HCl_over_pDCS)
-        + dgamma_GeH4 * log(p_GeH4_over_pDCS);
+        + dgamma_HCl  * log(p_HCl_over_pSi)
+        + dgamma_GeH4 * log(p_GeH4_over_pSi){_residual_call(residual_names, Observable.GE)};
     double ratio = exp(ln_ratio);       /* x/(1-x) */
     return ratio / (1.0 + ratio);       /* -> x */
 }}
-{b_block}"""
+
+double calibrated_xGe(double T_wall_K, double p_HCl_over_pDCS, double p_GeH4_over_pDCS) {{
+    return calibrated_xGe_full(T_wall_K, p_HCl_over_pDCS, p_GeH4_over_pDCS,
+                               1e-300, 1e-300, 1e-300, 1e-300, 1e-300, 0.0, 0.0);
+}}
+{b_block}
+{c_block}
+{dopant_block}"""
 
 
 def export_mechanism_to_cfd(theta_gr: dict, theta_ge: dict, invT_scaler: tuple[float, float],
                             out_dir: str | Path, theta_b: dict | None = None,
-                            chem_system: str = "dcs") -> dict:
+                            chem_system: str = "dcs",
+                            theta_c: dict | None = None,
+                            theta_dopant: dict | None = None,
+                            residuals: dict[Observable, BoundedResidualMLP] | None = None) -> dict:
     """Write BOTH CFD-ACE+ input forms (Phase 9.3/9.4.1):
       out_dir/surface_bc_udf.c          -- exact UDF (recommended path)
       out_dir/elementary_mechanism.json -- literature-seed mechanism table,
@@ -287,7 +484,17 @@ def export_mechanism_to_cfd(theta_gr: dict, theta_ge: dict, invT_scaler: tuple[f
 
     udf_path = out_dir / "surface_bc_udf.c"
     if chem_system == "dcs":
-        udf_path.write_text(_udf_c_source(theta_gr, theta_ge, theta_b, invT_scaler))
+        udf_path.write_text(
+            _udf_c_source(
+                theta_gr,
+                theta_ge,
+                theta_b,
+                invT_scaler,
+                theta_c=theta_c,
+                theta_dopant=theta_dopant,
+                residuals=residuals,
+            )
+        )
     else:
         # NO calibrated power law exists for a non-DCS system (Tomasini's
         # data is 100% DCS-based) -- writing the DCS UDF here anyway would
@@ -331,3 +538,53 @@ def export_mechanism_to_cfd(theta_gr: dict, theta_ge: dict, invT_scaler: tuple[f
     log.info("Wrote CFD mechanism exports to %s (udf) and %s (elementary, %s)",
              udf_path, mech_path, calibration_status)
     return {"udf_path": str(udf_path), "mechanism_path": str(mech_path), "manifest": manifest}
+
+
+def export_calibrated_model_to_cfd(model: CalibratedChemistryModel, out_dir: str | Path) -> dict:
+    """Export the production physics-kernel + residual-NN package as a UDF.
+
+    Unlike ``export_mechanism_to_cfd``, this is not a Tomasini/DCS benchmark
+    helper. It consumes the unified chemistry package object and emits the
+    deterministic surface UDF that CFD-ACE+ should call at inference time.
+    """
+    if not model.enabled(Observable.GR):
+        raise ValueError("A production surface UDF requires at least a calibrated GR observable")
+    if not model.enabled(Observable.GE):
+        raise ValueError("Current CFD UDF export requires a calibrated Ge observable")
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    udf_path = out_dir / "surface_udf.c"
+    dopant_theta = model.theta.get(Observable.DOPANT)
+    theta_b = dopant_theta if dopant_theta and "lnK_B" in dopant_theta else None
+    theta_x = dopant_theta if dopant_theta and "lnK_X" in dopant_theta else None
+    udf_path.write_text(
+        _udf_c_source(
+            model.theta[Observable.GR],
+            model.theta[Observable.GE],
+            theta_b,
+            model.invT_scaler,
+            theta_c=model.theta.get(Observable.C),
+            theta_dopant=theta_x,
+            residuals=model.residuals,
+        )
+    )
+    manifest = {
+        "chem_class": model.spec.chem_class.value,
+        "target_deposit": model.spec.target_deposit,
+        "species": list(model.spec.species_names),
+        "enabled_observables": [o.value for o in model.spec.enabled_observables],
+        "training_source": model.training_source,
+        "transport_deembedding": model.transport_deembedding,
+        "residual_nn": {
+            obs.value: residual.to_jsonable()
+            for obs, residual in model.residuals.items()
+        },
+        "calibration_status": (
+            "production package export; CFD UDF is deterministic posterior-mean "
+            "physics plus bounded residual corrections"
+        ),
+    }
+    manifest_path = out_dir / "model_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    return {"udf_path": str(udf_path), "manifest_path": str(manifest_path), "manifest": manifest}

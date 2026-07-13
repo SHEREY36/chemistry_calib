@@ -89,3 +89,56 @@ def test_sigec_carbon_model_slot_trains_when_c_target_exists(monkeypatch):
     assert out["report"]["carbon_model_trained"] is True
     assert out["report"]["R2_C"] == pytest.approx(1.0)
     assert out["idata_c"] == "idata-c"
+
+
+def test_generic_dopant_slot_uses_dopant_feature_not_boron_path(monkeypatch):
+    captured = {}
+
+    class FakeMCMC:
+        def get_samples(self, *args, **kwargs):
+            return {"lnK_X": jnp.array([0.0, 0.0])}
+
+    def fake_run_mcmc(model_fn, X, y_log, cfg):
+        captured["model_name"] = model_fn.__name__
+        captured["X_shape"] = tuple(X.shape)
+        return FakeMCMC()
+
+    def fake_mu_draws(logmodel, mcmc, X, param_names):
+        captured["param_names"] = param_names
+        return jnp.zeros((2, X.shape[0]))
+
+    monkeypatch.setattr(pipeline, "run_mcmc", fake_run_mcmc)
+    monkeypatch.setattr(pipeline, "diagnostics", lambda mcmc: {"max_rhat": 1.0})
+    monkeypatch.setattr(pipeline, "mu_draws", fake_mu_draws)
+    monkeypatch.setattr(pipeline.az, "from_numpyro", lambda mcmc: "idata-x")
+
+    ds = Dataset([
+        _row(
+            chem_class=ChemClass.SIGEC_X,
+            dopant_species="PH3",
+            p_dopant=1e-4,
+            dopant_conc=3e19,
+            C_at_frac=None,
+        ),
+        _row(
+            chem_class=ChemClass.SIGEC_X,
+            T_K=983.15,
+            dopant_species="PH3",
+            p_dopant=2e-4,
+            dopant_conc=5e19,
+            C_at_frac=None,
+        ),
+    ])
+
+    out = pipeline.run_core_chemistry_calibration(
+        Config(),
+        ds=ds,
+        chem_class=ChemClass.SIGEC_X,
+        reference_reactor="XYZ_tool_1",
+    )
+
+    assert captured["model_name"] == "dopant_numpyro_model"
+    assert captured["X_shape"] == (2, 10)
+    assert captured["param_names"] == pipeline._X_PARAM_NAMES
+    assert out["report"]["observable_slots"]["dopant"]["trained"] is True
+    assert out["idata_dopant"] == "idata-x"

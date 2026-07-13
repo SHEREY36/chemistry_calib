@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from chem_ml.model_package import BoundedResidualMLP, Observable, RESIDUAL_INPUT_NAMES
 from chem_ml.schema import ChemClass, Dataset
 
 
@@ -29,10 +30,12 @@ class ResidualNN:
     so it shrinks to ~0 wherever the power law already explains the data."""
 
     def __init__(self, chem_class: ChemClass, in_size: int, n_out: int = 2,
-                 width_size: int = 16, depth: int = 2, seed: int = 0):
+                 width_size: int = 16, depth: int = 2, seed: int = 0,
+                 max_abs_log_correction: float = 0.5):
         self.chem_class = chem_class
         self.n_out = n_out
         self.in_size = in_size
+        self.max_abs_log_correction = max_abs_log_correction
         key = jax.random.PRNGKey(seed)
         self.net = eqx.nn.MLP(
             in_size=in_size, out_size=n_out, width_size=width_size, depth=depth,
@@ -45,7 +48,8 @@ class ResidualNN:
         if X_full.shape[-1] != self.in_size:
             raise ValueError(f"ResidualNN({self.chem_class}) expects in_size="
                               f"{self.in_size}, got {X_full.shape[-1]}")
-        return jax.vmap(self.net)(X_full)
+        raw = jax.vmap(self.net)(X_full)
+        return self.max_abs_log_correction * jnp.tanh(raw / self.max_abs_log_correction)
 
     def fit(self, X_full: jnp.ndarray, residual_targets: jnp.ndarray,
             l2: float = 1e-2, steps: int = 3000, lr: float = 5e-3) -> float:
@@ -57,7 +61,8 @@ class ResidualNN:
         opt_state = opt.init(eqx.filter(self.net, eqx.is_array))
 
         def loss_fn(net, X, y):
-            pred = jax.vmap(net)(X)
+            raw = jax.vmap(net)(X)
+            pred = self.max_abs_log_correction * jnp.tanh(raw / self.max_abs_log_correction)
             return jnp.mean((pred - y) ** 2)
 
         @eqx.filter_jit
@@ -78,13 +83,37 @@ class ResidualNN:
 
 
 def build_residual_input(ds: Dataset, fb) -> jnp.ndarray:
-    """Input = [standardized log-features (invT, ln_HCl, ln_GeH4, ln_B2H6),
-    raw ratios (p_HCl, p_GeH4, p_B2H6)] -- 7 columns. The raw (non-log)
-    ratios let the net represent the Regime-I low-pGeH4/pDCS curvature
-    (Tomasini Fig. 1) that the log-linear power law misses, without having
-    to relearn the whole log-space trend from scratch."""
+    """Input = standardized/log chemistry features plus raw precursor ratios.
+
+    The raw ratios let the net represent systematic curvature the log-linear
+    power law misses, without relearning the whole physics trend from scratch.
+    """
     raw = np.array([[r.p_HCl / r.p_DCS, r.p_GeH4 / r.p_DCS, r.p_B2H6 / r.p_DCS] for r in ds.rows])
     return jnp.concatenate([fb.X, jnp.asarray(raw)], axis=1)
+
+
+def export_bounded_residuals(
+    net: ResidualNN,
+    observables: list[Observable],
+) -> dict[Observable, BoundedResidualMLP]:
+    """Convert a trained Equinox residual net into static JSON/C-exportable MLPs."""
+    layers = list(net.net.layers)
+    out: dict[Observable, BoundedResidualMLP] = {}
+    if len(observables) > layers[-1].weight.shape[0]:
+        raise ValueError("more observables requested than residual network outputs")
+    for out_idx, obs in enumerate(observables):
+        weights = [np.asarray(layer.weight) for layer in layers[:-1]]
+        biases = [np.asarray(layer.bias) for layer in layers[:-1]]
+        weights.append(np.asarray(layers[-1].weight[out_idx:out_idx + 1, :]))
+        biases.append(np.asarray(layers[-1].bias[out_idx:out_idx + 1]))
+        out[obs] = BoundedResidualMLP(
+            observable=obs,
+            input_names=RESIDUAL_INPUT_NAMES,
+            weights=weights,
+            biases=biases,
+            max_abs_log_correction=net.max_abs_log_correction,
+        )
+    return out
 
 
 def fit_residual_networks(ds: Dataset, fb, residual_targets_by_class: dict[ChemClass, jnp.ndarray],

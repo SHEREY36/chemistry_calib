@@ -38,10 +38,13 @@ def generate_validation_report(cfg: Config | None = None) -> str:
     lines: list[str] = []
     w = lines.append
 
-    w("# Tomasini et al. (2010) Reproduction: Validation Report")
+    w("# Tomasini et al. (2010) Benchmark: Validation Report")
     w("")
     w(f"Generated {datetime.datetime.now().isoformat(timespec='seconds')} "
       f"on Python {platform.python_version()}.")
+    w("")
+    w("This is a benchmark proving that the physics-kernel family can reproduce a "
+      "known SiGe VPE dataset. It is not the production Applied-data calibration.")
     w("")
     w("Source: P. Tomasini, V. Machkaoutsan, S.G. Thomas, \"Analysis of silicon "
       "germanium vapor phase epitaxy kinetics,\" *Thin Solid Films* 518 (2010) S12-S17.")

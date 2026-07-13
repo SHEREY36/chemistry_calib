@@ -6,6 +6,7 @@ implemented each capability.
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -26,18 +27,29 @@ from chem_ml.contracts import (
 )
 from chem_ml.data_store import (
     load_accumulated_dataset,
+    load_production_dataset,
     load_registered_wafer_scans,
     register_new_data,
     register_wafer_scan,
 )
 from chem_ml.features import build_features
+from chem_ml.model_package import (
+    CalibratedChemistryModel,
+    Observable,
+    build_model_spec,
+    default_species_for_chem_class,
+)
 from chem_ml.physics_core import ge_logmodel, gr_logmodel
 from chem_ml.pipeline import (
+    _B_PARAM_NAMES,
+    _C_PARAM_NAMES,
     _GE_PARAM_NAMES,
     _GR_PARAM_NAMES,
+    _X_PARAM_NAMES,
     _run_reactor_mcmc,
     load_all_datasets,
     run_class_calibration,
+    run_core_chemistry_calibration,
     run_phase4_calibration,
     run_phase4_warm_start,
     run_phase7_cross_reactor,
@@ -45,6 +57,7 @@ from chem_ml.pipeline import (
 )
 from chem_ml.reactor_transfer import reactor_transfer_model_ge_only, reactor_transfer_model_gr_ge
 from chem_ml.report import generate_validation_report
+from chem_ml.residual_nn import ResidualNN, build_residual_input, export_bounded_residuals
 from chem_ml.schema import ChemClass, Mode, canonical_chem_class, ingest_standard_csv
 
 log = logging.getLogger("chem_ml.workflows")
@@ -61,10 +74,96 @@ def _save_posteriors(cfg: Config, result: dict) -> Path:
 
     out = Path(cfg.data_processed) / "posteriors"
     out.mkdir(parents=True, exist_ok=True)
-    for key, name in (("idata_gr", "gr.nc"), ("idata_ge", "ge.nc"), ("idata_b", "b.nc"), ("idata_c", "c.nc")):
+    for key, name in (
+        ("idata_gr", "gr.nc"),
+        ("idata_ge", "ge.nc"),
+        ("idata_b", "b.nc"),
+        ("idata_c", "c.nc"),
+        ("idata_dopant", "dopant.nc"),
+    ):
         if key in result:
             az.to_netcdf(result[key], out / name)
     return out
+
+
+def _fit_package_residuals(request: TrainRequest, result: dict, chem_class: ChemClass) -> dict[Observable, object]:
+    """Fit GR/Ge bounded residuals from the production fit residuals."""
+    if "mcmc_gr" not in result or "mcmc_ge" not in result:
+        return {}
+    ds = result.get("selected_dataset")
+    invT_scaler = result.get("invT_scaler")
+    if ds is None or invT_scaler is None:
+        return {}
+    joint = ds.filter_where(lambda r: r.GR_nm_min is not None and r.Ge_at_frac is not None)
+    if len(joint) < 8:
+        log.info("Skipping residual NN package fit: need at least 8 joint GR/Ge rows, got %d", len(joint))
+        return {}
+
+    fb = build_features(joint, invT_scaler=invT_scaler)
+    theta_gr = posterior_mean_params(result["mcmc_gr"], _GR_PARAM_NAMES)
+    theta_ge = posterior_mean_params(result["mcmc_ge"], _GE_PARAM_NAMES)
+    y_gr_log = jnp.asarray(np.log(np.array([r.GR_nm_min for r in joint.rows])))
+    y_ge = np.array([r.Ge_at_frac for r in joint.rows])
+    y_ge_log = jnp.asarray(np.log(y_ge / (1.0 - y_ge)))
+    resid = jnp.stack([
+        y_gr_log - gr_logmodel(theta_gr, fb.X),
+        y_ge_log - ge_logmodel(theta_ge, fb.X),
+    ], axis=1)
+
+    X_resid = build_residual_input(joint, fb)
+    net = ResidualNN(chem_class=chem_class, in_size=X_resid.shape[1], n_out=2)
+    net.fit(X_resid, resid, l2=0.3, steps=request.residual_steps)
+    return export_bounded_residuals(net, [Observable.GR, Observable.GE])
+
+
+def _build_model_package(cfg: Config, request: TrainRequest, result: dict) -> CalibratedChemistryModel:
+    target_class = canonical_chem_class(request.chem_class)
+    species = request.species_names or default_species_for_chem_class(target_class)
+    spec = build_model_spec(
+        target_class,
+        species,
+        target_deposit=request.target_deposit or target_class.value,
+        mode=request.mode,
+    )
+    theta: dict[Observable, dict[str, float]] = {}
+    if "mcmc_gr" in result:
+        theta[Observable.GR] = posterior_mean_params(result["mcmc_gr"], _GR_PARAM_NAMES)
+    if "mcmc_ge" in result:
+        theta[Observable.GE] = posterior_mean_params(result["mcmc_ge"], _GE_PARAM_NAMES)
+    if "mcmc_c" in result:
+        theta[Observable.C] = posterior_mean_params(result["mcmc_c"], _C_PARAM_NAMES)
+    if "mcmc_b" in result:
+        theta[Observable.DOPANT] = posterior_mean_params(result["mcmc_b"], _B_PARAM_NAMES)
+    if "mcmc_x" in result:
+        theta[Observable.DOPANT] = posterior_mean_params(result["mcmc_x"], _X_PARAM_NAMES)
+    if not theta:
+        raise ValueError("No fitted observable slots are available for model package export.")
+
+    residuals = _fit_package_residuals(request, result, target_class) if request.fit_residual_nn else {}
+    invT_scaler = result.get("invT_scaler")
+    if invT_scaler is None:
+        for key in ("features_gr", "features_ge", "features_c", "features_dopant", "features_ds1"):
+            if key in result:
+                invT_scaler = result[key].invT_scaler
+                break
+    if invT_scaler is None:
+        raise ValueError("Cannot export model package without an inverse-temperature scaler.")
+
+    return CalibratedChemistryModel(
+        spec=spec,
+        theta=theta,
+        invT_scaler=invT_scaler,
+        residuals=residuals,
+        training_source="tomasini_benchmark" if request.use_benchmark_data else "registered_production_data",
+        transport_deembedding="not_started",
+    )
+
+
+def _save_model_package(path: str | Path, model: CalibratedChemistryModel) -> Path:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(model.to_jsonable(), indent=2))
+    return p
 
 
 def register_experiment(cfg: Config, request: RegisterExperimentRequest) -> dict:
@@ -192,15 +291,25 @@ def train(cfg: Config, request: TrainRequest) -> dict:
     """Train or fit the requested model/update path."""
     if request.target == TrainTarget.CHEMISTRY:
         if request.strategy == TrainStrategy.POOLED:
-            ds = load_accumulated_dataset(cfg) if request.include_registered else None
+            if request.use_benchmark_data:
+                ds = load_accumulated_dataset(cfg) if request.include_registered else None
+            else:
+                ds = load_production_dataset(cfg) if request.include_registered else None
             target_class = canonical_chem_class(request.chem_class)
             reference_reactor = request.reference_reactor or request.reactor_id or "ASM_Epsilon"
-            if target_class == ChemClass.SIGE and reference_reactor == "ASM_Epsilon":
+            if request.use_benchmark_data and target_class == ChemClass.SIGE and reference_reactor == "ASM_Epsilon":
                 result = run_phase4_calibration(cfg, ds=ds)
-            else:
+            elif request.use_benchmark_data:
                 result = run_class_calibration(
                     cfg,
                     ds=ds,
+                    chem_class=request.chem_class,
+                    reference_reactor=reference_reactor,
+                )
+            else:
+                result = run_core_chemistry_calibration(
+                    cfg,
+                    ds=ds or load_production_dataset(cfg),
                     chem_class=request.chem_class,
                     reference_reactor=reference_reactor,
                 )
@@ -208,6 +317,7 @@ def train(cfg: Config, request: TrainRequest) -> dict:
                 "target": request.target.value,
                 "strategy": request.strategy.value,
                 "include_registered": request.include_registered,
+                "use_benchmark_data": request.use_benchmark_data,
                 "chem_class": target_class.value,
                 "reference_reactor": reference_reactor,
                 "report": result["report"],
@@ -215,6 +325,10 @@ def train(cfg: Config, request: TrainRequest) -> dict:
             }
             if request.save_posteriors:
                 response["posterior_dir"] = str(_save_posteriors(cfg, result))
+            if request.save_model_package:
+                model = _build_model_package(cfg, request, result)
+                response["model_package_path"] = str(_save_model_package(request.model_package_path, model))
+                response["model_package"] = model.to_jsonable()
             return response
 
         if request.strategy == TrainStrategy.WARM_START:
@@ -283,6 +397,7 @@ def validate(cfg: Config, request: ValidateRequest) -> dict:
                 target=TrainTarget.CHEMISTRY,
                 strategy=TrainStrategy.POOLED,
                 include_registered=False,
+                use_benchmark_data=True,
             ),
         )
         return {"suite": request.suite.value, "report": out["report"], "_model_result": out["_model_result"]}

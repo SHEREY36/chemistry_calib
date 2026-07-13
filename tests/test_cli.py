@@ -38,6 +38,50 @@ def test_cli_train_accepts_sigec_reference_reactor(monkeypatch, capsys):
     assert '"ok": true' in capsys.readouterr().out
 
 
+def test_cli_train_accepts_model_package_and_species_flags(monkeypatch):
+    captured = {}
+
+    def fake_train(cfg, request):
+        captured["request"] = request
+        return {"target": request.target.value, "strategy": request.strategy.value, "report": {"ok": True}}
+
+    monkeypatch.setattr(cli, "train", fake_train)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chem-ml",
+            "train",
+            "--target",
+            "chemistry",
+            "--chem-class",
+            "SiGe",
+            "--reference-reactor",
+            "AMAT_tool_1",
+            "--species",
+            "dichlorosilane",
+            "germane",
+            "hcl",
+            "hydrogen",
+            "--target-deposit",
+            "SiGe",
+            "--save-model-package",
+            "--model-package-path",
+            "data/processed/sige_model_package.json",
+            "--no-residual-nn",
+        ],
+    )
+
+    cli.main()
+
+    req = captured["request"]
+    assert req.species_names == ("dichlorosilane", "germane", "hcl", "hydrogen")
+    assert req.target_deposit == "SiGe"
+    assert req.save_model_package is True
+    assert req.model_package_path == "data/processed/sige_model_package.json"
+    assert req.fit_residual_nn is False
+
+
 def test_cli_data_add_accepts_generic_doped_sigec(monkeypatch):
     captured = {}
 

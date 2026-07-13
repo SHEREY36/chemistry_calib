@@ -69,6 +69,13 @@ class TrainRequest:
     widen_factor: float = 2.0
     include_registered: bool = True
     save_posteriors: bool = False
+    use_benchmark_data: bool = False
+    species_names: tuple[str, ...] = ()
+    target_deposit: str = ""
+    save_model_package: bool = False
+    model_package_path: str = "data/processed/model_package.json"
+    fit_residual_nn: bool = True
+    residual_steps: int = 2000
 
 
 @dataclass(frozen=True)

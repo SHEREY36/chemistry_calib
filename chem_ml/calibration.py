@@ -14,7 +14,7 @@ import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, Predictive
 
 from chem_ml.config import Config, PriorConfig
-from chem_ml.physics_core import b_logmodel, c_logmodel, destandardize_kappa, ge_logmodel, gr_logmodel
+from chem_ml.physics_core import b_logmodel, c_logmodel, destandardize_kappa, dopant_logmodel, ge_logmodel, gr_logmodel
 
 
 def _sample_normal(name: str, ms: tuple[float, float]):
@@ -55,6 +55,18 @@ def b_numpyro_model(X: jnp.ndarray, y_log: Optional[jnp.ndarray], pri: PriorConf
     sigma = numpyro.sample("sigma_B", dist.HalfNormal(pri.sigma_halfnormal))
     mu = b_logmodel(p, X)
     numpyro.sample("obs_B", dist.Normal(mu, sigma), obs=y_log)
+
+
+def dopant_numpyro_model(X: jnp.ndarray, y_log: Optional[jnp.ndarray], pri: PriorConfig):
+    p = {
+        "lnK_X": _sample_normal("lnK_X", pri.lnK_X),
+        "beta_HCl_X": _sample_normal("beta_HCl_X", pri.beta_HCl_X),
+        "beta_GeH4_X": _sample_normal("beta_GeH4_X", pri.beta_GeH4_X),
+        "beta_dopant_X": _sample_normal("beta_dopant_X", pri.beta_dopant_X),
+    }
+    sigma = numpyro.sample("sigma_X", dist.HalfNormal(pri.sigma_halfnormal))
+    mu = dopant_logmodel(p, X)
+    numpyro.sample("obs_X", dist.Normal(mu, sigma), obs=y_log)
 
 
 def c_numpyro_model(X: jnp.ndarray, y_log: Optional[jnp.ndarray], pri: PriorConfig):
